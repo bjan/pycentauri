@@ -49,7 +49,8 @@ async def test_discover_parses_response(fake_responder: tuple[socket.socket, int
 
     task = asyncio.create_task(responder())
     try:
-        found = await discover(timeout=0.3, broadcast_address="127.0.0.1", port=port)
+        # 1.5s budget with 3 retries — generous enough for macOS CI loopback.
+        found = await discover(timeout=1.5, broadcast_address="127.0.0.1", port=port)
     finally:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):

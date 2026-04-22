@@ -6,7 +6,12 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.1.0] - TBD
+### Changed
+- `discover()` retransmits the probe multiple times within the timeout
+  window, improving reliability on busy or lossy networks. Also binds
+  explicitly to `0.0.0.0` so loopback delivery works on macOS.
+
+## [0.1.0] - 2026-04-22
 
 ### Added
 - Async Python client for Elegoo Centauri Carbon printers speaking SDCP v3 over

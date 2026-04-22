@@ -68,19 +68,22 @@ async def discover(
     timeout: float = DEFAULT_TIMEOUT,
     broadcast_address: str = "255.255.255.255",
     port: int = DISCOVERY_PORT,
+    retries: int = 3,
 ) -> list[DiscoveredPrinter]:
     """Broadcast the SDCP discovery probe and collect responders.
 
     Blocks for ``timeout`` seconds. Returns one entry per responding printer,
-    de-duplicated by source IP. Safe to call concurrently from multiple
-    tasks; each call uses its own UDP socket.
+    de-duplicated by source IP. The probe is retransmitted ``retries`` times
+    at evenly-spaced intervals within the timeout window, since UDP probes
+    can be dropped on busy or congested networks. Safe to call concurrently
+    from multiple tasks; each call uses its own UDP socket.
     """
     loop = asyncio.get_running_loop()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("", 0))
+    sock.bind(("0.0.0.0", 0))
     sock.setblocking(False)
 
     transport, protocol = await loop.create_datagram_endpoint(
@@ -88,8 +91,15 @@ async def discover(
         sock=sock,
     )
     try:
-        transport.sendto(DISCOVERY_PROBE, (broadcast_address, port))
-        await asyncio.sleep(timeout)
+        tries = max(1, retries)
+        interval = timeout / max(tries, 1) / 2
+        for _ in range(tries):
+            transport.sendto(DISCOVERY_PROBE, (broadcast_address, port))
+            await asyncio.sleep(interval)
+        # Listen for the remainder of the budget for late replies.
+        remaining = max(0.0, timeout - interval * tries)
+        if remaining:
+            await asyncio.sleep(remaining)
     finally:
         transport.close()
 
