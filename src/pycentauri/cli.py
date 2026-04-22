@@ -55,9 +55,21 @@ def _echo_err(msg: str) -> None:
     typer.echo(msg, err=True)
 
 
-async def _resolve_host(host: str | None) -> str:
+async def _resolve_target(host: str | None) -> tuple[str, str | None]:
+    """Return (host, mainboard_id). Mainboard_id may be None if discovery failed.
+
+    Always runs a brief UDP discovery so we can pre-seed the mainboard ID on
+    ``Printer.connect()`` — the printer doesn't push Attributes in paused/
+    errored states, and without a mainboard ID every command would hang.
+    """
     if host:
-        return host
+        # Short discovery to learn the mainboard; don't fail if it times out.
+        found = await discover_printers(timeout=1.0, retries=2)
+        for p in found:
+            if p.host == host and p.mainboard_id:
+                return host, p.mainboard_id
+        return host, None
+
     found = await discover_printers(timeout=2.5)
     if not found:
         _echo_err("No printers found on the LAN. Pass --host explicitly.")
@@ -67,7 +79,7 @@ async def _resolve_host(host: str | None) -> str:
         for p in found:
             _echo_err(f"  {p.host}  {p.machine_name or '?'}  {p.firmware_version or '?'}")
         raise typer.Exit(code=2)
-    return found[0].host
+    return found[0].host, found[0].mainboard_id
 
 
 def _run(coro: asyncio.coroutines.Coroutine[object, object, object]) -> object:  # type: ignore[name-defined]
@@ -128,8 +140,8 @@ def cmd_status(host: HostOpt = None, as_json: JsonOpt = False) -> None:
     """Print the printer's current status once and exit."""
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, mainboard_id=mid) as printer:
             st = await printer.status()
         if as_json:
             typer.echo(json.dumps(st.raw, indent=2, default=str))
@@ -178,8 +190,8 @@ def cmd_watch(
     """Stream live status updates until interrupted (Ctrl-C)."""
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h, push_period_ms=period_ms) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, push_period_ms=period_ms, mainboard_id=mid) as printer:
             async for st in printer.watch():
                 if as_json:
                     typer.echo(json.dumps(st.raw, default=str))
@@ -201,8 +213,8 @@ def cmd_attributes(host: HostOpt = None, as_json: JsonOpt = False) -> None:
     """Print the printer's attributes (model, firmware, capabilities)."""
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, mainboard_id=mid) as printer:
             attrs = await printer.attributes()
         if as_json:
             typer.echo(json.dumps(attrs.raw, indent=2, default=str))
@@ -226,8 +238,8 @@ def cmd_snapshot(
     """Save a JPEG snapshot from the built-in webcam."""
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, mainboard_id=mid) as printer:
             jpeg = await printer.snapshot(timeout=timeout)
         if str(out) == "-":
             sys.stdout.buffer.write(jpeg)
@@ -266,8 +278,8 @@ def cmd_print_start(
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h, enable_control=True) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
             result = await printer.start_print(
                 filename, storage=storage, auto_leveling=auto_leveling, timelapse=timelapse
             )
@@ -284,8 +296,8 @@ def cmd_print_pause(host: HostOpt = None, enable_control: ControlOpt = False) ->
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h, enable_control=True) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
             await printer.pause()
         typer.echo("paused")
 
@@ -300,8 +312,8 @@ def cmd_print_resume(host: HostOpt = None, enable_control: ControlOpt = False) -
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h, enable_control=True) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
             await printer.resume()
         typer.echo("resumed")
 
@@ -316,8 +328,8 @@ def cmd_print_stop(host: HostOpt = None, enable_control: ControlOpt = False) -> 
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h = await _resolve_host(host)
-        async with await Printer.connect(h, enable_control=True) as printer:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
             await printer.stop()
         typer.echo("stop sent")
 

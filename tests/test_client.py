@@ -185,6 +185,57 @@ async def test_control_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> N
                 await printer.stop()
 
 
+async def test_preseeded_mainboard_skips_attributes_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the caller passes mainboard_id=, commands work before Attributes arrive.
+
+    Simulates the paused-printer scenario: the fake server only pushes
+    Attributes after it sees a subscribe, so a client that waits for
+    Attributes before subscribing would deadlock. With mainboard_id=
+    preset, the client can subscribe immediately.
+    """
+
+    class _SilentPrinter(_FakePrinter):
+        async def _handler(self, ws) -> None:  # type: ignore[no-untyped-def,override]
+            # Do NOT push Attributes automatically — only reply to commands.
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                self.received.append(msg)
+                data = msg.get("Data") or {}
+                cmd = data.get("Cmd")
+                request_id = data.get("RequestID")
+                await ws.send(
+                    json.dumps(
+                        {
+                            "Id": MAINBOARD,
+                            "Topic": f"sdcp/response/{MAINBOARD}",
+                            "Data": {
+                                "Cmd": cmd,
+                                "RequestID": request_id,
+                                "MainboardID": MAINBOARD,
+                                "Data": {"Ack": 0},
+                            },
+                        }
+                    )
+                )
+
+    server = _SilentPrinter()
+    await server.start()
+    try:
+        monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+        async with await Printer.connect(
+            "127.0.0.1", enable_control=True, mainboard_id=MAINBOARD
+        ) as printer:
+            # Must work without any Attributes push ever arriving.
+            result = await asyncio.wait_for(printer.pause(), timeout=3)
+            assert result.inner is not None and result.inner["Data"]["Ack"] == 0
+        assert any(m["Data"]["Cmd"] == int(Cmd.PAUSE_PRINT) for m in server.received)
+    finally:
+        await server.stop()
+
+
 async def test_control_enabled_sends_commands(monkeypatch: pytest.MonkeyPatch) -> None:
     async with _fake_printer() as server:
         monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)

@@ -40,6 +40,24 @@ def _resolve_host() -> str:
     return host
 
 
+async def _resolve_target() -> tuple[str, str | None]:
+    """Resolve (host, mainboard_id) with a brief discovery.
+
+    Caches the mainboard ID in the process env after the first successful
+    lookup so subsequent tool invocations don't each pay the discovery cost.
+    """
+    host = _resolve_host()
+    cached = os.environ.get("PYCENTAURI_MAINBOARD_ID")
+    if cached:
+        return host, cached
+    found = await _lan_discover(timeout=1.0, retries=2)
+    for p in found:
+        if p.host == host and p.mainboard_id:
+            os.environ["PYCENTAURI_MAINBOARD_ID"] = p.mainboard_id
+            return host, p.mainboard_id
+    return host, None
+
+
 def build_server(*, enable_control: bool = False) -> FastMCP:
     """Construct the FastMCP server, registering tools per the control flag.
 
@@ -55,8 +73,8 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         Includes state code, job filename, progress %, layer, temperatures
         (nozzle / bed / chamber), fan speeds, and the raw SDCP payload.
         """
-        host = _resolve_host()
-        async with await Printer.connect(host) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, mainboard_id=mid) as printer:
             st = await printer.status()
         return {
             "host": host,
@@ -82,8 +100,8 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
     @mcp.tool()
     async def get_attributes() -> dict[str, Any]:
         """Return printer attributes: model, firmware, mainboard ID, capabilities."""
-        host = _resolve_host()
-        async with await Printer.connect(host) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, mainboard_id=mid) as printer:
             attrs = await printer.attributes()
         return {
             "host": host,
@@ -102,8 +120,8 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         The image is returned inline so the agent can see what the printer
         is currently doing (e.g. to spot layer shifts or spaghetti).
         """
-        host = _resolve_host()
-        async with await Printer.connect(host) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, mainboard_id=mid) as printer:
             jpeg = await printer.snapshot()
         return Image(data=jpeg, format="jpeg")
 
@@ -144,8 +162,8 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         ``"local"`` (default) or ``"udisk"``. Ask the user for confirmation
         before invoking — running a print unattended is the user's risk.
         """
-        host = _resolve_host()
-        async with await Printer.connect(host, enable_control=True) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
             result = await printer.start_print(
                 filename,
                 storage=storage,
@@ -157,24 +175,24 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
     @mcp.tool()
     async def pause_print() -> dict[str, Any]:
         """DESTRUCTIVE. Pause the current print. Ask the user before invoking."""
-        host = _resolve_host()
-        async with await Printer.connect(host, enable_control=True) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
             result = await printer.pause()
         return {"ok": True, "response": result.inner}
 
     @mcp.tool()
     async def resume_print() -> dict[str, Any]:
         """Resume a paused print."""
-        host = _resolve_host()
-        async with await Printer.connect(host, enable_control=True) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
             result = await printer.resume()
         return {"ok": True, "response": result.inner}
 
     @mcp.tool()
     async def stop_print() -> dict[str, Any]:
         """DESTRUCTIVE. Stop the current print. Ask the user before invoking."""
-        host = _resolve_host()
-        async with await Printer.connect(host, enable_control=True) as printer:
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
             result = await printer.stop()
         return {"ok": True, "response": result.inner}
 

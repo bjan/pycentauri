@@ -106,6 +106,21 @@ Control actions are gated behind an explicit `enable_control=True` (library) or
 registered when the flag is off, so an LLM never sees them. Still: leaving a
 printer running unattended with write-capable agents is your responsibility.
 
+## Known firmware quirks
+
+- **5 concurrent WebSocket connections max.** The printer's SDCP server
+  accepts up to 5 open WebSockets on port 3030; the 6th returns HTTP 500
+  with body `"too many client"`. Slots release immediately when a
+  connection closes — the CLI and MCP server each open/close one per
+  invocation, so this is almost never a problem in practice.
+- **Paused / errored states don't auto-push Attributes.** The printer only
+  sends its `Attributes` frame spontaneously while idle or printing. In
+  paused and errored states it stays silent until asked. Since every SDCP
+  command needs the printer's `MainboardID`, the client takes care of this
+  by pre-seeding the mainboard ID from a UDP discovery on every connect
+  (as of v0.1.1). If you call `Printer.connect()` directly without
+  discovery, pass `mainboard_id=` yourself.
+
 ## Credits & licensing
 
 - Protocol reference: [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link)

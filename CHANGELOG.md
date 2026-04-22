@@ -6,10 +6,34 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-04-22
+
+### Fixed
+- `Printer.status()`, `attributes()`, and all control methods hung
+  indefinitely when the printer was in a paused or errored state. The
+  firmware doesn't push `Attributes` spontaneously outside idle/active
+  states, and every SDCP command needs a `MainboardID` in its envelope,
+  so the client would deadlock waiting for a push that never comes.
+- The CLI and MCP server now pre-discover the printer over UDP before
+  opening the WebSocket and pass the mainboard ID into `Printer.connect()`.
+
+### Added
+- `Printer.connect(..., mainboard_id=...)` — pre-seed the mainboard ID
+  (e.g. from a prior `discover()`) so the client can send commands
+  immediately, without waiting for the printer's first `Attributes` push.
+- `Printer.wait_for_mainboard()` now raises a `PrinterError` with a
+  pointer at the `mainboard_id=` workaround instead of a bare
+  `asyncio.TimeoutError`.
+
 ### Changed
 - `discover()` retransmits the probe multiple times within the timeout
   window, improving reliability on busy or lossy networks. Also binds
   explicitly to `0.0.0.0` so loopback delivery works on macOS.
+
+### Known limits
+- Elegoo firmware accepts at most **5 concurrent WebSocket connections**
+  on port 3030. The 6th attempt is rejected at the HTTP upgrade with
+  `HTTP 500 "too many client"`. Slots release immediately on close.
 
 ## [0.1.0] - 2026-04-22
 

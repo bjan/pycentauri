@@ -69,6 +69,7 @@ class Printer:
         *,
         enable_control: bool = False,
         push_period_ms: int = DEFAULT_PUSH_PERIOD_MS,
+        mainboard_id: str | None = None,
     ) -> None:
         self.host = host
         self.enable_control = enable_control
@@ -76,9 +77,11 @@ class Printer:
 
         self._ws: ClientConnection | None = None
         self._reader: asyncio.Task[None] | None = None
-        self._mainboard_id: str | None = None
+        self._mainboard_id: str | None = mainboard_id or None
 
         self._mainboard_event = asyncio.Event()
+        if self._mainboard_id:
+            self._mainboard_event.set()
         self._latest_status: Status | None = None
         self._latest_status_event = asyncio.Event()
         self._latest_attributes: Attributes | None = None
@@ -96,9 +99,23 @@ class Printer:
         enable_control: bool = False,
         push_period_ms: int = DEFAULT_PUSH_PERIOD_MS,
         connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+        mainboard_id: str | None = None,
     ) -> Self:
-        """Open a WebSocket to the printer and start the reader task."""
-        self = cls(host, enable_control=enable_control, push_period_ms=push_period_ms)
+        """Open a WebSocket to the printer and start the reader task.
+
+        ``mainboard_id`` lets callers pre-seed the printer's serial/mainboard
+        identifier (e.g. from a prior discovery). When set, the client will
+        not wait for the printer's spontaneous ``Attributes`` push before
+        sending commands — which matters in paused/error states, where the
+        firmware doesn't push Attributes until prompted, and every command
+        requires ``MainboardID`` in its envelope.
+        """
+        self = cls(
+            host,
+            enable_control=enable_control,
+            push_period_ms=push_period_ms,
+            mainboard_id=mainboard_id,
+        )
         url = f"ws://{host}:{WS_PORT}{WS_PATH}"
         self._ws = await asyncio.wait_for(connect(url, max_size=None), timeout=connect_timeout)
         self._reader = asyncio.create_task(self._read_loop(), name=f"pycentauri-reader-{host}")
@@ -125,20 +142,26 @@ class Printer:
         return self._mainboard_id
 
     async def wait_for_mainboard(self, timeout: float = 5.0) -> str:
-        """Block until the printer has reported its mainboard ID."""
+        """Block until the printer has reported its mainboard ID.
+
+        Returns immediately if ``mainboard_id=`` was passed to
+        :meth:`connect`. Otherwise waits for the first ``Attributes`` push
+        from the printer. The printer only pushes Attributes spontaneously
+        in idle/active states — when paused or errored it stays silent until
+        asked, so callers that run in those states should pass ``mainboard_id``
+        explicitly (e.g. from a prior :func:`pycentauri.discover`).
+        """
         if self._mainboard_id:
             return self._mainboard_id
-        # The printer sends an Attributes push shortly after connect; a fresh
-        # GET_PRINTER_ATTRIBUTES also triggers one. Fire one off just in case.
-        with contextlib.suppress(Exception):
-            await self._send_raw(
-                sdcp.encode(
-                    sdcp.build_request(
-                        sdcp.Cmd.GET_PRINTER_ATTRIBUTES, None, self._mainboard_id or ""
-                    )
-                )
-            )
-        await asyncio.wait_for(self._mainboard_event.wait(), timeout=timeout)
+        try:
+            await asyncio.wait_for(self._mainboard_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError as err:
+            raise PrinterError(
+                "printer did not push Attributes within "
+                f"{timeout}s. Pass mainboard_id=... to Printer.connect() "
+                "(discover() provides one) — the firmware does not push "
+                "Attributes while paused or errored."
+            ) from err
         assert self._mainboard_id is not None
         return self._mainboard_id
 
