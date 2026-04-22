@@ -30,14 +30,18 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from importlib.resources import files as resource_files
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from pycentauri import __version__
+from pycentauri.camera import CAMERA_PATH, CAMERA_PORT
 from pycentauri.client import ControlDisabledError, Printer, PrinterError
 from pycentauri.discovery import DiscoveredPrinter
 from pycentauri.discovery import discover as lan_discover
@@ -208,17 +212,6 @@ def create_app(
         lifespan=lifespan,
     )
 
-    @app.get("/", tags=["meta"])
-    async def root(manager: PrinterManager = Depends(get_manager)) -> dict[str, Any]:
-        return {
-            "service": "pycentauri",
-            "version": __version__,
-            "printer_host": manager.host,
-            "mainboard_id": manager._mainboard_id,
-            "connected": manager._printer is not None and not manager._printer._closed,
-            "enable_control": manager.enable_control,
-        }
-
     @app.get("/status", tags=["read"])
     async def status_endpoint(
         manager: PrinterManager = Depends(get_manager),
@@ -282,6 +275,38 @@ def create_app(
             headers={"Cache-Control": "no-store"},
         )
 
+    @app.get("/stream", tags=["read"])
+    async def stream_endpoint(
+        manager: PrinterManager = Depends(get_manager),
+    ) -> StreamingResponse:
+        """Proxy the printer's MJPEG stream.
+
+        The printer serves ``multipart/x-mixed-replace`` on port 3031.
+        Browsers can render this directly in an ``<img src=...>`` tag. We
+        proxy it through the API server so the UI never needs to know the
+        printer's IP and so cross-origin isn't an issue.
+        """
+        url = f"http://{manager.host}:{CAMERA_PORT}{CAMERA_PATH}"
+        client = httpx.AsyncClient(timeout=None)
+
+        async def body() -> AsyncIterator[bytes]:
+            try:
+                async with client.stream("GET", url) as upstream:
+                    if upstream.status_code != 200:
+                        return
+                    async for chunk in upstream.aiter_raw():
+                        yield chunk
+            except Exception as err:
+                log.warning("MJPEG proxy error: %r", err)
+            finally:
+                with contextlib.suppress(Exception):
+                    await client.aclose()
+
+        return StreamingResponse(
+            body(),
+            media_type="multipart/x-mixed-replace; boundary=--foo",
+        )
+
     @app.get("/discover", tags=["read"])
     async def discover_endpoint() -> list[dict[str, Any]]:
         found: list[DiscoveredPrinter] = await lan_discover(timeout=2.0, retries=2)
@@ -316,6 +341,45 @@ def create_app(
                 yield {"event": "error", "data": str(err)}
 
         return EventSourceResponse(gen())
+
+    # --- Meta / health ------------------------------------------------------
+
+    @app.get("/api/info", tags=["meta"])
+    async def api_info(
+        manager: PrinterManager = Depends(get_manager),
+    ) -> dict[str, Any]:
+        return {
+            "service": "pycentauri",
+            "version": __version__,
+            "printer_host": manager.host,
+            "mainboard_id": manager._mainboard_id,
+            "connected": manager._printer is not None and not manager._printer._closed,
+            "enable_control": manager.enable_control,
+        }
+
+    # --- Static web UI ------------------------------------------------------
+
+    _web_root = resource_files("pycentauri").joinpath("web")
+    if _web_root.is_dir():
+        app.mount("/ui", StaticFiles(directory=str(_web_root), html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        async def root_redirect() -> RedirectResponse:
+            return RedirectResponse(url="/ui/", status_code=307)
+    else:
+
+        @app.get("/", tags=["meta"])
+        async def root_fallback(
+            manager: PrinterManager = Depends(get_manager),
+        ) -> dict[str, Any]:
+            # Web UI assets not present — fall back to JSON health.
+            return {
+                "service": "pycentauri",
+                "version": __version__,
+                "printer_host": manager.host,
+                "enable_control": manager.enable_control,
+                "ui": "not installed",
+            }
 
     if not enable_control:
         return app

@@ -32,11 +32,16 @@ async def test_read_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     # Mimic the lifespan manager manually: the async-context machinery
     # under httpx.AsyncClient doesn't drive lifespan, so do it ourselves.
     async with app.router.lifespan_context(app), await _asgi_client(app) as client:
-        r = await client.get("/")
+        # /api/info is the JSON health endpoint; / redirects to /ui/.
+        r = await client.get("/api/info")
         assert r.status_code == 200
         body = r.json()
         assert body["service"] == "pycentauri"
         assert body["printer_host"] == "127.0.0.1"
+
+        r = await client.get("/ui/", follow_redirects=False)
+        assert r.status_code == 200
+        assert "<!DOCTYPE html>" in r.text
 
         r = await client.get("/status")
         assert r.status_code == 200

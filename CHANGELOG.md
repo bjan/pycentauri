@@ -6,6 +6,24 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-22
+
+### Added
+- **Web UI** at `GET /ui/` (and `GET /` redirects there). Single static
+  dashboard bundled in the wheel — no build step, no framework. Shows
+  live webcam (MJPEG), progress bar, layer counter, temperature cards,
+  position, fans, and Z-offset. Pause / Resume / Stop buttons auto-appear
+  when the server is launched with `--enable-control`.
+- `GET /stream` — MJPEG proxy through the API server to the printer's
+  `:3031/video`. Browsers render it directly in an `<img>` tag.
+- `GET /api/info` — JSON health endpoint, matching what `GET /` used to
+  return before it was repurposed to redirect to `/ui/`.
+
+### Changed
+- `GET /` now redirects to `/ui/` (307). If the web assets aren't found
+  in the wheel (custom build, etc.), `/` falls back to a minimal JSON
+  health response so scripted clients don't break.
+
 ## [0.2.0] - 2026-04-22
 
 ### Added

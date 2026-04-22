@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pycentauri</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header>
+    <h1>pycentauri</h1>
+    <div id="header-meta">
+      <span id="printer-name">…</span>
+      <span id="firmware"></span>
+      <span id="status-dot" class="dot" title="Connection state"></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card webcam">
+      <img id="webcam" alt="Webcam" src="/stream">
+      <a class="snap-link" href="/snapshot" download="snapshot.jpg">Snapshot</a>
+    </section>
+
+    <section class="card job">
+      <div id="filename" class="filename">—</div>
+      <div class="progress-wrap">
+        <div id="progress-bar" class="progress-bar"></div>
+        <span id="progress-label" class="progress-label">—</span>
+      </div>
+      <div class="job-meta">
+        <div><span class="k">state</span><span id="print-status">—</span></div>
+        <div><span class="k">layer</span><span id="layer">—</span></div>
+        <div><span class="k">elapsed</span><span id="elapsed">—</span></div>
+        <div><span class="k">remaining</span><span id="remaining">—</span></div>
+      </div>
+    </section>
+
+    <section class="temps">
+      <div class="card temp">
+        <div class="k">nozzle</div>
+        <div class="t"><span id="t-nozzle">—</span><span class="unit">°C</span></div>
+        <div class="sub">target <span id="t-nozzle-target">—</span>°C</div>
+      </div>
+      <div class="card temp">
+        <div class="k">bed</div>
+        <div class="t"><span id="t-bed">—</span><span class="unit">°C</span></div>
+        <div class="sub">target <span id="t-bed-target">—</span>°C</div>
+      </div>
+      <div class="card temp">
+        <div class="k">chamber</div>
+        <div class="t"><span id="t-chamber">—</span><span class="unit">°C</span></div>
+        <div class="sub">target <span id="t-chamber-target">—</span>°C</div>
+      </div>
+    </section>
+
+    <section id="controls" class="card controls" hidden>
+      <h2>Control</h2>
+      <div class="btn-row">
+        <button id="btn-pause"  class="btn warn">Pause</button>
+        <button id="btn-resume" class="btn">Resume</button>
+        <button id="btn-stop"   class="btn danger">Stop</button>
+      </div>
+      <div id="ctrl-msg" class="ctrl-msg"></div>
+    </section>
+
+    <section class="card position">
+      <div class="row"><span class="k">position</span><span id="position">—</span></div>
+      <div class="row"><span class="k">z-offset</span><span id="z-offset">—</span></div>
+      <div class="row"><span class="k">fans</span><span id="fans">—</span></div>
+      <div class="row"><span class="k">mainboard</span><span id="mainboard">—</span></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>pycentauri <span id="version">—</span></span>
+    <span>·</span>
+    <span id="host">—</span>
+    <span>·</span>
+    <a href="/docs">API docs</a>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

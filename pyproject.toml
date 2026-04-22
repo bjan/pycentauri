@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pycentauri"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python client and MCP server for Elegoo Centauri Carbon 3D printers"
 readme = "README.md"
 license = "Apache-2.0"
@@ -57,6 +57,9 @@ Changelog = "https://github.com/bjan/pycentauri/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pycentauri"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/pycentauri", "tests", "README.md", "LICENSE", "CHANGELOG.md"]
 
 [tool.ruff]
 line-length = 100

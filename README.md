@@ -4,7 +4,7 @@ Python client, CLI, and MCP server for the [Elegoo Centauri
 Carbon](https://www.elegoo.com/) 3D printer.
 
 `pycentauri` speaks the printer's native SDCP v3 protocol over its local
-WebSocket (port 3030) — no cloud account required. It exposes four surfaces:
+WebSocket (port 3030) — no cloud account required. It exposes five surfaces:
 
 1. An **async Python library** for direct integration.
 2. A **`centauri` CLI** for quick status checks, snapshots, and control.
@@ -12,6 +12,8 @@ WebSocket (port 3030) — no cloud account required. It exposes four surfaces:
    MCP-compatible client) can monitor and drive the printer as a tool.
 4. An **HTTP + SSE server** for dashboards, reverse-proxy integration, and
    anything that wants a plain REST API.
+5. A **built-in web UI** (dark theme, mobile-friendly) served at `/ui/` by
+   the HTTP server — live webcam, progress, temperatures, and control.
 
 > **Status:** alpha. The protocol has been reverse-engineered from the official
 > [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link) C++ SDK and the
@@ -89,10 +91,13 @@ centauri server --host 192.168.1.209 --bind 0.0.0.0 --port 8787 --enable-control
 
 | Method | Path | Notes |
 |---|---|---|
-| `GET` | `/` | Health + version |
+| `GET` | `/` | Redirects to `/ui/` |
+| `GET` | `/ui/` | Built-in web dashboard |
+| `GET` | `/api/info` | Health + version (JSON) |
 | `GET` | `/status` | Latest status push (cached; updates every ~5s) |
 | `GET` | `/attributes` | Printer attributes |
 | `GET` | `/snapshot` | `image/jpeg` response |
+| `GET` | `/stream` | MJPEG stream proxied from the printer (embeds in `<img>`) |
 | `GET` | `/discover` | LAN scan |
 | `GET` | `/events/status` | Server-Sent Events stream of pushes |
 | `POST` | `/print/start` | Body: `{"filename": "cube.gcode"}`. Requires `--enable-control`. |
