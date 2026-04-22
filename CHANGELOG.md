@@ -6,6 +6,24 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-04-22
+
+### Changed
+- README audited end-to-end for accuracy: removed claims about a
+  `~/.config/pycentauri/config.toml` loader that was never implemented,
+  an `upload_file` / `list_files` MCP tool that doesn't exist, and a
+  `centauri files` command that was a stub. Added the RTSP endpoints
+  (`/api/rtsp/*`) and the FastAPI auto-docs URLs to the endpoint table,
+  plus a note that the RTSP bridge itself isn't gated by
+  `--enable-control`.
+- Updated the package tagline on PyPI and in the module docstring to
+  reflect all six surfaces rather than just three.
+
+### Removed
+- The stub `centauri files` CLI command. It always exited with
+  "not yet supported" and was only there to reserve the name; not
+  worth the README lie.
+
 ## [0.4.0] - 2026-04-22
 
 ### Added

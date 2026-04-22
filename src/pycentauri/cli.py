@@ -250,19 +250,6 @@ def cmd_snapshot(
     _run(run())
 
 
-@app.command("files")
-def cmd_files(host: HostOpt = None, as_json: JsonOpt = False) -> None:
-    """List files stored on the printer.
-
-    Note: the file-list command isn't wired in v0.1 (the upstream SDK also
-    marks it as not-implemented on CC); this is a stub so the command name
-    is reserved.
-    """
-
-    _echo_err("file listing is not yet supported on the original Centauri Carbon firmware")
-    raise typer.Exit(code=1)
-
-
 @print_cmd.command("start")
 def cmd_print_start(
     filename: Annotated[str, typer.Argument(help="File name as it appears on the printer.")],
