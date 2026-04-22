@@ -480,11 +480,15 @@ body {
   text-transform: uppercase;
   line-height: 1;
 }
-.state-word.state-idle     { color: var(--fg-dim); }
-.state-word.state-printing { color: var(--ok); }
-.state-word.state-paused   { color: var(--warn); }
-.state-word.state-stopped  { color: var(--danger); }
-.state-word.state-completed{ color: var(--cyan); }
+.state-word.state-idle      { color: var(--fg-dim); }
+.state-word.state-printing  { color: var(--ok); }
+.state-word.state-paused    { color: var(--warn); }
+.state-word.state-stopped   { color: var(--danger); }
+.state-word.state-completed { color: var(--cyan); }
+.state-word.state-err       {
+  color: var(--danger);
+  text-shadow: 0 0 10px rgba(235, 92, 78, 0.45);
+}
 
 /* ---- Thermal gauges --------------------------------------- */
 

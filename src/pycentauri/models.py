@@ -178,10 +178,13 @@ class Status(BaseModel):
 
 
 class PrintStatus:
-    """Known ``PrintInfo.Status`` codes.
+    """``PrintInfo.Status`` codes from the official Elegoo SDK.
 
-    Decoded from CentauriLink and the official SDK; not all codes are observed
-    on every firmware. Treat unknown codes as opaque.
+    Sourced verbatim from
+    ``src/lan/adapters/elegoo_fdm_cc/elegoo_fdm_cc_message_adapter.cpp``
+    in the ``ELEGOO-3D/elegoo-link`` repository. Codes in the 2-4 and 23-26
+    ranges are resin-printer / LCD-specific and typically aren't surfaced
+    by the Centauri Carbon, but are kept for forward-compatibility.
     """
 
     IDLE = 0
@@ -195,8 +198,22 @@ class PrintStatus:
     STOPPED = 8
     COMPLETED = 9
     FILE_CHECKING = 10
-    PREPARING = 12
+    PRINTER_CHECKING = 11
+    RESUMING = 12
     PRINTING = 13
+    ERROR = 14
+    AUTO_LEVELING = 15
+    PREHEATING = 16
+    RESONANCE_TESTING = 17
+    PRINT_START = 18
+    AUTO_LEVELING_COMPLETED = 19
+    PREHEATING_COMPLETED = 20
+    HOMING_COMPLETED = 21
+    RESONANCE_TESTING_COMPLETED = 22
+    AUTO_FEEDING = 23
+    UNLOADING = 24
+    UNLOADING_ABNORMAL = 25
+    UNLOADING_PAUSED = 26
 
 
 class Attributes(BaseModel):

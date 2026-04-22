@@ -6,6 +6,22 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-04-22
+
+### Changed
+- Complete `PrintInfo.Status` code table, lifted verbatim from the
+  authoritative enum in Elegoo's `elegoo-link` SDK. Previously the web
+  UI (and the `pycentauri.models.PrintStatus` constants) only covered
+  about half the codes — which meant users hit `CODE·20` literally
+  during the routine PREHEAT-DONE transition between prints, and
+  similarly for 11, 14, 15, 16, 17, 19, 21, 22, 23–26.
+- Added a distinct visual class for the ERROR state (code 14) in the
+  web UI so it renders in red with a soft glow instead of falling into
+  the generic "unknown" bucket.
+- Renamed a couple of previously-incorrect labels: code 12 was shown as
+  "PREPARING", it's actually "RESUMING"; code 18 was shown as
+  "RESUMED", it's actually "PRINT START" — both per the SDK.
+
 ## [0.4.1] - 2026-04-22
 
 ### Changed

@@ -5,22 +5,38 @@
 const $ = (id) => document.getElementById(id);
 
 // PrintInfo.Status → display label + semantic class.
-// Codes decoded from CentauriLink + official elegoo-link + live observation.
+// Table is authoritative, lifted from Elegoo's own elegoo-link SDK
+// (src/lan/adapters/elegoo_fdm_cc/elegoo_fdm_cc_message_adapter.cpp:33–62).
+// Codes 2/3/4 and 23–26 are resin-printer / LCD-specific — kept here for
+// completeness in case a future firmware surfaces them on the Carbon.
 const PRINT_STATUS = {
-  0:  { label: "IDLE",       cls: "state-idle" },
-  1:  { label: "HOMING",     cls: "state-printing" },
-  2:  { label: "DROPPING",   cls: "state-printing" },
-  3:  { label: "EXPOSING",   cls: "state-printing" },
-  4:  { label: "LIFTING",    cls: "state-printing" },
-  5:  { label: "PAUSING",    cls: "state-paused" },
-  6:  { label: "PAUSED",     cls: "state-paused" },
-  7:  { label: "STOPPING",   cls: "state-stopped" },
-  8:  { label: "STOPPED",    cls: "state-stopped" },
-  9:  { label: "COMPLETED",  cls: "state-completed" },
-  10: { label: "CHECKING",   cls: "state-printing" },
-  12: { label: "PREPARING",  cls: "state-printing" },
-  13: { label: "PRINTING",   cls: "state-printing" },
-  18: { label: "RESUMED",    cls: "state-printing" },
+  0:  { label: "IDLE",         cls: "state-idle" },
+  1:  { label: "HOMING",       cls: "state-printing" },
+  2:  { label: "DROPPING",     cls: "state-printing" },
+  3:  { label: "EXPOSING",     cls: "state-printing" },
+  4:  { label: "LIFTING",      cls: "state-printing" },
+  5:  { label: "PAUSING",      cls: "state-paused" },
+  6:  { label: "PAUSED",       cls: "state-paused" },
+  7:  { label: "STOPPING",     cls: "state-stopped" },
+  8:  { label: "STOPPED",      cls: "state-stopped" },
+  9:  { label: "COMPLETED",    cls: "state-completed" },
+  10: { label: "FILE CHECK",   cls: "state-printing" },
+  11: { label: "SELF CHECK",   cls: "state-printing" },
+  12: { label: "RESUMING",     cls: "state-printing" },
+  13: { label: "PRINTING",     cls: "state-printing" },
+  14: { label: "ERROR",        cls: "state-err" },
+  15: { label: "LEVELING",     cls: "state-printing" },
+  16: { label: "PREHEATING",   cls: "state-printing" },
+  17: { label: "RESONANCE",    cls: "state-printing" },
+  18: { label: "PRINT START",  cls: "state-printing" },
+  19: { label: "LEVEL DONE",   cls: "state-printing" },
+  20: { label: "PREHEAT DONE", cls: "state-printing" },
+  21: { label: "HOMING DONE",  cls: "state-printing" },
+  22: { label: "RESONANCE OK", cls: "state-printing" },
+  23: { label: "AUTO FEED",    cls: "state-printing" },
+  24: { label: "UNLOADING",    cls: "state-printing" },
+  25: { label: "UNLOAD ERR",   cls: "state-err" },
+  26: { label: "UNLOAD PAUSE", cls: "state-paused" },
 };
 
 function fmtSeconds(s) {
@@ -107,7 +123,10 @@ function renderStatus(raw) {
   const info = PRINT_STATUS[pstatus];
   const sw = $("print-status");
   const sc = $("print-status-code");
-  sw.classList.remove("state-idle", "state-printing", "state-paused", "state-stopped", "state-completed");
+  sw.classList.remove(
+    "state-idle", "state-printing", "state-paused",
+    "state-stopped", "state-completed", "state-err",
+  );
   if (info) {
     sw.textContent = info.label;
     sw.classList.add(info.cls);
