@@ -252,6 +252,120 @@ function wireControls() {
 }
 
 // ---------------------------------------------------------------------------
+// RTSP bridge
+
+function setRtspMsg(text, kind) {
+  const el = $("rtsp-msg");
+  el.classList.remove("ok", "err", "warn");
+  if (kind) el.classList.add(kind);
+  el.textContent = text || "";
+}
+
+function renderRtsp(info) {
+  const panel = $("rtsp-panel");
+  if (!info || !info.enabled) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const state = $("rtsp-state");
+  const btn   = $("btn-rtsp-toggle");
+  const lbl   = $("btn-rtsp-label");
+  const url   = $("rtsp-url");
+  const meta  = $("rtsp-meta");
+
+  // URL — prefer the advertised URL that uses the hostname the user hit us with.
+  const shown = (info.advertised_urls && info.advertised_urls[0]) ||
+                (info.urls && info.urls[0]) ||
+                "rtsp://—";
+  url.textContent = shown;
+  url.classList.toggle("dim", !info.running);
+
+  // Meta: port, path, fps, bitrate
+  const parts = [];
+  if (info.port)    parts.push(`PORT ${info.port}`);
+  if (info.path)    parts.push(`PATH /${info.path}`);
+  if (info.fps)     parts.push(`FPS ${info.fps}`);
+  if (info.bitrate) parts.push(`BR ${info.bitrate}`);
+  meta.textContent = parts.join("   ·   ");
+
+  // State + button
+  state.classList.remove("on", "off", "err", "na");
+  if (!info.available) {
+    state.textContent = "N/A";
+    state.classList.add("na");
+    lbl.textContent = "N/A";
+    btn.disabled = true;
+    setRtspMsg(info.reason || "MediaMTX or ffmpeg not available.", "err");
+    return;
+  }
+  if (info.running) {
+    state.textContent = "ONLINE";
+    state.classList.add("on");
+    lbl.textContent = "STOP";
+  } else {
+    state.textContent = "OFFLINE";
+    state.classList.add("off");
+    lbl.textContent = "START";
+  }
+  btn.disabled = false;
+
+  if (info.reason && !info.running) {
+    setRtspMsg(info.reason, "warn");
+  } else if (info.running) {
+    setRtspMsg("MediaMTX running · ffmpeg transcode is on-demand", "ok");
+  } else {
+    setRtspMsg("", null);
+  }
+}
+
+async function loadRtsp() {
+  try {
+    const r = await fetch("/api/rtsp");
+    if (!r.ok) { $("rtsp-panel").hidden = true; return; }
+    renderRtsp(await r.json());
+  } catch (e) {
+    $("rtsp-panel").hidden = true;
+  }
+}
+
+async function toggleRtsp() {
+  const btn = $("btn-rtsp-toggle");
+  const isRunning = $("rtsp-state").classList.contains("on");
+  const path = isRunning ? "/api/rtsp/stop" : "/api/rtsp/start";
+  btn.disabled = true;
+  setRtspMsg(isRunning ? "stopping MediaMTX…" : "starting MediaMTX…");
+  try {
+    const r = await fetch(path, { method: "POST" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    renderRtsp(await r.json());
+  } catch (e) {
+    setRtspMsg(`${isRunning ? "stop" : "start"} failed — ${e.message}`, "err");
+    btn.disabled = false;
+  }
+}
+
+function wireRtsp() {
+  $("btn-rtsp-toggle")?.addEventListener("click", toggleRtsp);
+  $("btn-rtsp-copy")?.addEventListener("click", async () => {
+    const url = $("rtsp-url").textContent;
+    const btn = $("btn-rtsp-copy");
+    try {
+      await navigator.clipboard.writeText(url);
+      btn.classList.add("done");
+      btn.textContent = "OK";
+      setTimeout(() => {
+        btn.classList.remove("done");
+        btn.textContent = "COPY";
+      }, 1200);
+    } catch (_) {
+      setRtspMsg("clipboard blocked — select the URL and copy manually", "warn");
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Webcam resilience — if the MJPEG stream stalls, reload it.
 
 function wireWebcamKeepalive() {
@@ -274,9 +388,13 @@ function wireWebcamKeepalive() {
 
 (async function main() {
   wireControls();
+  wireRtsp();
   wireWebcamKeepalive();
   await loadInfo();
+  await loadRtsp();
   await pollOnce();
   connectSSE();
   setInterval(loadInfo, 60000);
+  // RTSP state changes are external, poll occasionally.
+  setInterval(loadRtsp, 8000);
 })();

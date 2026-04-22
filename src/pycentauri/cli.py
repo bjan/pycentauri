@@ -345,6 +345,18 @@ def cmd_server(
     port: int = typer.Option(8787, "--port", "-p"),
     enable_control: ControlOpt = False,
     log_level: str = typer.Option("info", "--log-level"),
+    rtsp: bool = typer.Option(
+        False,
+        "--rtsp/--no-rtsp",
+        help="Enable /api/rtsp/* endpoints and the STREAM panel in the web UI.",
+    ),
+    rtsp_port: int = typer.Option(8554, "--rtsp-port", help="RTSP port (when --rtsp)."),
+    rtsp_path: str = typer.Option("printer", "--rtsp-path", help="RTSP URL path."),
+    rtsp_bind: str = typer.Option(
+        "0.0.0.0", "--rtsp-bind", help="Interface MediaMTX binds to for RTSP."
+    ),
+    rtsp_fps: int = typer.Option(15, "--rtsp-fps"),
+    rtsp_bitrate: str = typer.Option("2M", "--rtsp-bitrate"),
 ) -> None:
     """Run the HTTP + SSE server (requires `pip install 'pycentauri[server]'`)."""
     try:
@@ -358,6 +370,20 @@ def cmd_server(
         return await _resolve_target(host)
 
     h, mid = asyncio.run(resolve())
+
+    rtsp_cfg = None
+    if rtsp:
+        from pycentauri.rtsp import RtspConfig
+
+        rtsp_cfg = RtspConfig(
+            printer_host=h,
+            rtsp_port=rtsp_port,
+            bind=rtsp_bind,
+            path=rtsp_path,
+            fps=rtsp_fps,
+            bitrate=rtsp_bitrate,
+        )
+
     run_server(
         h,
         bind=bind,
@@ -365,7 +391,62 @@ def cmd_server(
         enable_control=enable_control,
         mainboard_id=mid,
         log_level=log_level,
+        rtsp_config=rtsp_cfg,
     )
+
+
+@app.command("rtsp")
+def cmd_rtsp(
+    host: HostOpt = None,
+    port: int = typer.Option(8554, "--port", "-p", help="RTSP TCP port."),
+    bind: str = typer.Option("0.0.0.0", "--bind", help="Interface to bind MediaMTX on."),
+    stream_path: str = typer.Option("printer", "--path", help="RTSP path, e.g. rtsp://.../<path>"),
+    fps: int = typer.Option(15, "--fps", help="Re-encode frame rate cap."),
+    bitrate: str = typer.Option("2M", "--bitrate", help="ffmpeg video bitrate (e.g. 2M, 4M)."),
+    preset: str = typer.Option("veryfast", "--preset", help="libx264 preset."),
+    mediamtx_path: str = typer.Option(
+        None, "--mediamtx-path", help="Override mediamtx binary path."
+    ),
+    ffmpeg_path: str = typer.Option(None, "--ffmpeg-path", help="Override ffmpeg binary path."),
+    enable_webrtc: bool = typer.Option(
+        False, "--webrtc/--no-webrtc", help="Also serve WebRTC (MediaMTX defaults)."
+    ),
+    enable_hls: bool = typer.Option(False, "--hls/--no-hls", help="Also serve HLS."),
+) -> None:
+    """Re-stream the printer's MJPEG webcam as RTSP/H.264 via MediaMTX.
+
+    Requires ``mediamtx`` and ``ffmpeg`` on $PATH (or supply --*-path).
+    Transcoding only happens while a client is actually connected to the
+    RTSP URL, so idle cost is zero.
+    """
+    from pycentauri.rtsp import RtspConfig, RtspError, run
+
+    async def resolve() -> tuple[str, str | None]:
+        return await _resolve_target(host)
+
+    h, _mid = asyncio.run(resolve())
+
+    cfg = RtspConfig(
+        printer_host=h,
+        rtsp_port=port,
+        bind=bind,
+        path=stream_path,
+        fps=fps,
+        bitrate=bitrate,
+        preset=preset,
+        mediamtx_path=mediamtx_path,
+        ffmpeg_path=ffmpeg_path,
+        enable_webrtc=enable_webrtc,
+        enable_hls=enable_hls,
+    )
+    try:
+        exit_code = run(cfg)
+    except RtspError as err:
+        _echo_err(str(err))
+        raise typer.Exit(code=1) from err
+    except KeyboardInterrupt:
+        exit_code = 0
+    raise typer.Exit(code=exit_code)
 
 
 @app.command("mcp")

@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import subprocess
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.resources import files as resource_files
@@ -41,6 +42,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from pycentauri import __version__
+from pycentauri import rtsp as rtsp_module
 from pycentauri.camera import CAMERA_PATH, CAMERA_PORT
 from pycentauri.client import ControlDisabledError, Printer, PrinterError
 from pycentauri.discovery import DiscoveredPrinter
@@ -143,6 +145,75 @@ class PrinterManager:
             backoff = min(backoff * 2, RECONNECT_BACKOFF_MAX)
 
 
+class RtspController:
+    """Start / stop a MediaMTX subprocess on demand from the HTTP server.
+
+    Designed to be held on ``app.state`` alongside the PrinterManager and
+    driven by the web UI. Idempotent: multiple start calls while already
+    running are a no-op; stop on a stopped server is a no-op.
+    """
+
+    def __init__(self, cfg: rtsp_module.RtspConfig) -> None:
+        self.cfg = cfg
+        self._proc: subprocess.Popen[bytes] | None = None
+        self._cfg_path: str | None = None
+        self._last_error: str | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
+
+    def urls(self, advertised_host: str | None = None) -> list[str]:
+        return rtsp_module.build_urls(self.cfg, advertised_host=advertised_host)
+
+    def available(self) -> bool:
+        try:
+            rtsp_module.ensure_binaries(self.cfg)
+            return True
+        except rtsp_module.RtspError:
+            return False
+
+    def unavailable_reason(self) -> str | None:
+        try:
+            rtsp_module.ensure_binaries(self.cfg)
+            return None
+        except rtsp_module.RtspError as err:
+            return str(err)
+
+    async def start(self) -> None:
+        async with self._lock:
+            if self.running:
+                return
+            # The subprocess spawn itself is fast but blocks briefly; run it
+            # in a thread so we don't stall the event loop.
+            loop = asyncio.get_running_loop()
+            try:
+                proc, cfg_path = await loop.run_in_executor(
+                    None, rtsp_module.start_detached, self.cfg
+                )
+            except rtsp_module.RtspError as err:
+                self._last_error = str(err)
+                raise
+            self._proc = proc
+            self._cfg_path = cfg_path
+            self._last_error = None
+
+    async def stop(self) -> None:
+        async with self._lock:
+            proc, cfg_path = self._proc, self._cfg_path
+            self._proc = None
+            self._cfg_path = None
+        if proc is None and cfg_path is None:
+            return
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, rtsp_module.stop_detached, proc, cfg_path)
+
+
 # --- Pydantic request bodies ------------------------------------------------
 
 
@@ -183,22 +254,28 @@ def create_app(
     *,
     enable_control: bool = False,
     mainboard_id: str | None = None,
+    rtsp_config: rtsp_module.RtspConfig | None = None,
 ) -> FastAPI:
     """Build the FastAPI app. ``host`` is the printer's IP/hostname.
 
     The app runs a single background :class:`PrinterManager` that owns the
     WebSocket lifecycle. Control endpoints are registered only when
-    ``enable_control`` is ``True``.
+    ``enable_control`` is ``True``. ``rtsp_config`` enables the
+    ``/api/rtsp/*`` endpoints and the "STREAM" panel in the web UI.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         manager = PrinterManager(host, enable_control=enable_control, mainboard_id=mainboard_id)
         app.state.manager = manager
+        app.state.rtsp = RtspController(rtsp_config) if rtsp_config is not None else None
         await manager.start()
         try:
             yield
         finally:
+            if app.state.rtsp is not None:
+                with contextlib.suppress(Exception):
+                    await app.state.rtsp.stop()
             await manager.stop()
 
     app = FastAPI(
@@ -342,6 +419,62 @@ def create_app(
 
         return EventSourceResponse(gen())
 
+    # --- RTSP bridge --------------------------------------------------------
+
+    def _rtsp_state(request: Request) -> dict[str, Any]:
+        controller: RtspController | None = getattr(request.app.state, "rtsp", None)
+        if controller is None:
+            return {
+                "enabled": False,
+                "available": False,
+                "running": False,
+                "urls": [],
+                "advertised_urls": [],
+                "reason": "RTSP feature not enabled on server; pass --rtsp on centauri server",
+            }
+        advertised_host = request.url.hostname
+        return {
+            "enabled": True,
+            "available": controller.available(),
+            "running": controller.running,
+            "port": controller.cfg.rtsp_port,
+            "path": controller.cfg.path,
+            "fps": controller.cfg.fps,
+            "bitrate": controller.cfg.bitrate,
+            "urls": controller.urls(),
+            "advertised_urls": controller.urls(advertised_host=advertised_host),
+            "reason": controller.unavailable_reason() or controller.last_error,
+        }
+
+    @app.get("/api/rtsp", tags=["rtsp"])
+    async def rtsp_status(request: Request) -> dict[str, Any]:
+        return _rtsp_state(request)
+
+    @app.post("/api/rtsp/start", tags=["rtsp"])
+    async def rtsp_start(request: Request) -> dict[str, Any]:
+        controller: RtspController | None = getattr(request.app.state, "rtsp", None)
+        if controller is None:
+            raise HTTPException(
+                status_code=404,
+                detail="RTSP feature not enabled. Launch server with --rtsp.",
+            )
+        try:
+            await controller.start()
+        except rtsp_module.RtspError as err:
+            raise HTTPException(status_code=503, detail=str(err)) from err
+        return _rtsp_state(request)
+
+    @app.post("/api/rtsp/stop", tags=["rtsp"])
+    async def rtsp_stop(request: Request) -> dict[str, Any]:
+        controller: RtspController | None = getattr(request.app.state, "rtsp", None)
+        if controller is None:
+            raise HTTPException(
+                status_code=404,
+                detail="RTSP feature not enabled. Launch server with --rtsp.",
+            )
+        await controller.stop()
+        return _rtsp_state(request)
+
     # --- Meta / health ------------------------------------------------------
 
     @app.get("/api/info", tags=["meta"])
@@ -444,6 +577,7 @@ def run(
     enable_control: bool = False,
     mainboard_id: str | None = None,
     log_level: str = "info",
+    rtsp_config: rtsp_module.RtspConfig | None = None,
 ) -> None:
     """Launch the server with uvicorn (blocks).
 
@@ -453,7 +587,12 @@ def run(
     """
     import uvicorn
 
-    app = create_app(host, enable_control=enable_control, mainboard_id=mainboard_id)
+    app = create_app(
+        host,
+        enable_control=enable_control,
+        mainboard_id=mainboard_id,
+        rtsp_config=rtsp_config,
+    )
     uvicorn.run(app, host=bind, port=port, log_level=log_level)
 
 

@@ -7,6 +7,7 @@ We hit the app through httpx's ASGI transport — no real HTTP port bound.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -94,6 +95,105 @@ async def test_control_endpoints_registered_when_enabled(monkeypatch: pytest.Mon
     assert int(Cmd.PAUSE_PRINT) in cmds
     assert int(Cmd.RESUME_PRINT) in cmds
     await server.stop()
+
+
+async def test_rtsp_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.get("/api/rtsp")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["enabled"] is False
+        assert body["running"] is False
+
+        # Start/stop should 404 when feature is off.
+        r = await client.post("/api/rtsp/start")
+        assert r.status_code == 404
+    await server.stop()
+
+
+async def test_rtsp_enabled_reports_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # Don't actually spawn mediamtx — point the override at a fake binary so
+    # the availability check passes for /api/rtsp/start's "could not launch"
+    # path to be exercised, then end with a real stop() no-op.
+    fake_mtx = tmp_path / "mediamtx"
+    fake_mtx.write_text("#!/bin/sh\nsleep 60\n")
+    fake_mtx.chmod(0o755)
+    fake_ffmpeg = tmp_path / "ffmpeg"
+    fake_ffmpeg.write_text("#!/bin/sh\nsleep 60\n")
+    fake_ffmpeg.chmod(0o755)
+
+    from pycentauri.rtsp import RtspConfig
+
+    cfg = RtspConfig(
+        printer_host="192.168.1.209",
+        rtsp_port=18554,
+        bind="127.0.0.1",
+        path="printer",
+        mediamtx_path=str(fake_mtx),
+        ffmpeg_path=str(fake_ffmpeg),
+    )
+
+    fake_ws = _FakePrinter()
+    await fake_ws.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", fake_ws.port)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD, rtsp_config=cfg)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.get("/api/rtsp")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["enabled"] is True
+        assert body["available"] is True
+        assert body["running"] is False
+        assert body["port"] == 18554
+        assert body["path"] == "printer"
+        assert body["urls"] == ["rtsp://127.0.0.1:18554/printer"]
+
+        # Start will spawn the fake binary (which just sleeps).
+        r = await client.post("/api/rtsp/start")
+        assert r.status_code == 200
+        assert r.json()["running"] is True
+
+        # Stop cleans up.
+        r = await client.post("/api/rtsp/stop")
+        assert r.status_code == 200
+        assert r.json()["running"] is False
+    await fake_ws.stop()
+
+
+async def test_rtsp_unavailable_when_binaries_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from pycentauri.rtsp import RtspConfig
+
+    cfg = RtspConfig(
+        printer_host="192.168.1.209",
+        mediamtx_path=str(tmp_path / "does-not-exist"),
+    )
+
+    fake_ws = _FakePrinter()
+    await fake_ws.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", fake_ws.port)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD, rtsp_config=cfg)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.get("/api/rtsp")
+        body = r.json()
+        assert body["enabled"] is True
+        assert body["available"] is False
+        assert body["running"] is False
+        assert "MediaMTX" in (body["reason"] or "")
+
+        # Start should 503 with an install hint.
+        r = await client.post("/api/rtsp/start")
+        assert r.status_code == 503
+        assert "MediaMTX" in r.text
+    await fake_ws.stop()
 
 
 async def test_start_print_request_body_validation(monkeypatch: pytest.MonkeyPatch) -> None:

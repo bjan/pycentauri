@@ -4,7 +4,7 @@ Python client, CLI, and MCP server for the [Elegoo Centauri
 Carbon](https://www.elegoo.com/) 3D printer.
 
 `pycentauri` speaks the printer's native SDCP v3 protocol over its local
-WebSocket (port 3030) — no cloud account required. It exposes five surfaces:
+WebSocket (port 3030) — no cloud account required. It exposes six surfaces:
 
 1. An **async Python library** for direct integration.
 2. A **`centauri` CLI** for quick status checks, snapshots, and control.
@@ -12,8 +12,10 @@ WebSocket (port 3030) — no cloud account required. It exposes five surfaces:
    MCP-compatible client) can monitor and drive the printer as a tool.
 4. An **HTTP + SSE server** for dashboards, reverse-proxy integration, and
    anything that wants a plain REST API.
-5. A **built-in web UI** (dark theme, mobile-friendly) served at `/ui/` by
-   the HTTP server — live webcam, progress, temperatures, and control.
+5. A **built-in web UI** (industrial instrument-panel theme, mobile-friendly)
+   served at `/ui/` by the HTTP server.
+6. An **RTSP bridge** that re-streams the printer's MJPEG webcam as
+   H.264/RTSP for Home Assistant, Jellyfin, VLC, Frigate, and NVRs.
 
 > **Status:** alpha. The protocol has been reverse-engineered from the official
 > [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link) C++ SDK and the
@@ -106,6 +108,32 @@ centauri server --host 192.168.1.209 --bind 0.0.0.0 --port 8787 --enable-control
 The server holds a single long-lived WebSocket to the printer and reuses
 it for every request — no per-request reconnect, and it won't bump into
 the firmware's 5-slot limit.
+
+## Quick start — RTSP bridge
+
+```sh
+# Install dependencies first:
+#   mediamtx  https://github.com/bluenviron/mediamtx/releases  (or `brew install mediamtx`)
+#   ffmpeg    `brew install ffmpeg` or `apt install ffmpeg`
+
+# Standalone: foreground, Ctrl-C to stop
+centauri rtsp --host 192.168.1.209
+# → rtsp://<this-host>:8554/printer
+
+# Or, integrated with the HTTP server + web UI
+centauri server --host 192.168.1.209 --rtsp --bind 0.0.0.0
+# Web UI gains a STREAM panel with a toggle, a copy-URL button, and live status
+# at http://<this-host>:8787/ui/
+```
+
+Open that URL in **VLC** (Media → Open Network Stream), point **Home Assistant**
+at it via the Generic Camera integration, or feed it to **Frigate** / **Jellyfin**
+/ **Synology Surveillance** for NVR recording and motion detection.
+
+MediaMTX runs the ffmpeg transcode only while at least one client is actually
+connected, so idle cost is zero. Tunable: `--fps`, `--bitrate`, `--preset`,
+`--path`, `--port`, `--bind`. Run `centauri rtsp --help` (or
+`centauri server --help`) for the full list.
 
 ## Quick start — MCP
 

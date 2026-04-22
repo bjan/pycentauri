@@ -707,6 +707,96 @@ body {
 .ctrl-msg.warn { border-left-color: var(--warn);   color: var(--warn); }
 .ctrl-msg.err  { border-left-color: var(--danger); color: var(--danger); }
 
+/* ---- RTSP panel ------------------------------------------- */
+
+.rtsp-panel { padding-bottom: 14px; }
+
+.rtsp-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.rtsp-state {
+  font-family: var(--f-display);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  text-transform: uppercase;
+}
+.rtsp-state.on  { color: var(--ok); }
+.rtsp-state.off { color: var(--fg-dim); }
+.rtsp-state.err { color: var(--danger); }
+.rtsp-state.na  { color: var(--fg-faint); }
+
+.rtsp-toggle {
+  min-width: 110px;
+  padding: 10px 14px;
+  border-bottom-width: 3px;
+}
+
+.rtsp-url-wrap {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.rtsp-url {
+  flex: 1;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--cyan);
+  background: var(--bg-inset);
+  border: 1px solid var(--rule);
+  padding: 8px 10px;
+  overflow-x: auto;
+  white-space: nowrap;
+  user-select: all;
+}
+.rtsp-url.dim { color: var(--fg-faint); }
+
+.copy-btn {
+  padding: 0 12px;
+  font-family: var(--f-label);
+  font-size: 10px;
+  letter-spacing: 0.2em;
+  font-weight: 700;
+  color: var(--fg-dim);
+  background: var(--bg-inset);
+  border: 1px solid var(--rule);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.copy-btn:hover {
+  color: var(--amber);
+  border-color: var(--amber);
+  background: #1a1812;
+}
+.copy-btn.done { color: var(--ok); border-color: var(--ok); }
+
+.rtsp-meta {
+  font-family: var(--f-mono);
+  font-size: 10px;
+  color: var(--fg-dim);
+  letter-spacing: 0.04em;
+  padding: 4px 0;
+}
+
+.rtsp-msg {
+  margin-top: 6px;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  min-height: 1.2em;
+  padding-left: 10px;
+  border-left: 2px solid var(--rule);
+}
+.rtsp-msg.ok   { border-left-color: var(--ok);     color: var(--ok); }
+.rtsp-msg.err  { border-left-color: var(--danger); color: var(--danger); }
+.rtsp-msg.warn { border-left-color: var(--warn);   color: var(--warn); }
+
 /* ---- Load-in cascade -------------------------------------- */
 
 .panel, .viewport {

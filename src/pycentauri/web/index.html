@@ -167,6 +167,27 @@
         </div>
       </div>
 
+      <!-- RTSP stream control -->
+      <div class="panel rtsp-panel" id="rtsp-panel" hidden>
+        <header class="panel-header">
+          <span class="panel-tag">STREAM</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx" id="rtsp-state-idx">06</span>
+        </header>
+        <div class="rtsp-row">
+          <span class="rtsp-state" id="rtsp-state">—</span>
+          <button id="btn-rtsp-toggle" class="kbd-btn rtsp-toggle" type="button" disabled>
+            <span class="kbd-label" id="btn-rtsp-label">—</span>
+          </button>
+        </div>
+        <div class="rtsp-url-wrap">
+          <code class="rtsp-url" id="rtsp-url">rtsp://—</code>
+          <button id="btn-rtsp-copy" class="copy-btn" type="button" title="Copy URL">COPY</button>
+        </div>
+        <div class="rtsp-meta" id="rtsp-meta"></div>
+        <div class="rtsp-msg" id="rtsp-msg" aria-live="polite"></div>
+      </div>
+
       <!-- Kinematics + fans -->
       <div class="panel tele-panel">
         <header class="panel-header">

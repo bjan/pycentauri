@@ -6,6 +6,27 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-22
+
+### Added
+- **RTSP bridge.** Re-stream the printer's MJPEG webcam as RTSP/H.264
+  so VLC, Home Assistant, Jellyfin, Frigate, Synology Surveillance, and
+  any other RTSP client can consume it. Powered by `MediaMTX` +
+  on-demand `ffmpeg` transcode — the transcoder only runs while at least
+  one client is connected, so idle cost is zero. Two ways to drive it:
+  - **Standalone**: `centauri rtsp --host <printer>` runs in the
+    foreground until Ctrl-C. Flags: `--port`, `--bind`, `--path`,
+    `--fps`, `--bitrate`, `--preset`, `--webrtc/--no-webrtc`,
+    `--hls/--no-hls`, and `--mediamtx-path` / `--ffmpeg-path`
+    overrides.
+  - **Integrated with `centauri server --rtsp`**: adds a "STREAM" panel
+    to the built-in web UI with start/stop buttons, a copy-URL button,
+    and live status. New endpoints: `GET /api/rtsp`,
+    `POST /api/rtsp/start`, `POST /api/rtsp/stop`.
+- Requires `mediamtx` and `ffmpeg` on `$PATH` — clear install hints
+  surface in the API response and the UI panel if either is missing,
+  and nothing changes for users who don't enable the feature.
+
 ## [0.3.1] - 2026-04-22
 
 ### Changed
