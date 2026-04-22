@@ -6,6 +6,27 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-22
+
+### Added
+- **HTTP + SSE server.** `centauri server [--host IP] [--bind 127.0.0.1]
+  [--port 8787] [--enable-control]` runs a FastAPI app that wraps the
+  same client library used by the CLI and MCP server:
+  - `GET /` — health, version, connection state
+  - `GET /status` — latest status snapshot (JSON)
+  - `GET /attributes` — printer attributes (JSON)
+  - `GET /snapshot` — single JPEG frame from the webcam
+  - `GET /discover` — UDP LAN scan
+  - `GET /events/status` — Server-Sent Events stream of live status pushes
+  - `POST /print/{start,pause,resume,stop}` — only registered with
+    `--enable-control` (mirrors the MCP security posture — the routes
+    literally don't exist without the flag)
+- New optional extra: `pip install 'pycentauri[server]'` pulls in
+  FastAPI + uvicorn + sse-starlette.
+- The server holds a single long-lived WebSocket for its lifetime with
+  auto-reconnect and exponential backoff, so it never bumps against the
+  printer's 5-slot limit and HTTP requests return cached pushes instantly.
+
 ## [0.1.1] - 2026-04-22
 
 ### Fixed

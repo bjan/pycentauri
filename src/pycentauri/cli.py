@@ -336,6 +336,38 @@ def cmd_print_stop(host: HostOpt = None, enable_control: ControlOpt = False) -> 
     _run(run())
 
 
+@app.command("server")
+def cmd_server(
+    host: HostOpt = None,
+    bind: str = typer.Option(
+        "127.0.0.1", "--bind", help="Interface to bind. Use 0.0.0.0 to expose on LAN."
+    ),
+    port: int = typer.Option(8787, "--port", "-p"),
+    enable_control: ControlOpt = False,
+    log_level: str = typer.Option("info", "--log-level"),
+) -> None:
+    """Run the HTTP + SSE server (requires `pip install 'pycentauri[server]'`)."""
+    try:
+        from pycentauri.server import run as run_server
+    except ImportError as err:
+        _echo_err("Server support not installed. Install with: pip install 'pycentauri[server]'")
+        _echo_err(f"(missing dependency: {err})")
+        raise typer.Exit(code=1) from err
+
+    async def resolve() -> tuple[str, str | None]:
+        return await _resolve_target(host)
+
+    h, mid = asyncio.run(resolve())
+    run_server(
+        h,
+        bind=bind,
+        port=port,
+        enable_control=enable_control,
+        mainboard_id=mid,
+        log_level=log_level,
+    )
+
+
 @app.command("mcp")
 def cmd_mcp(
     enable_control: ControlOpt = False,

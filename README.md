@@ -4,12 +4,14 @@ Python client, CLI, and MCP server for the [Elegoo Centauri
 Carbon](https://www.elegoo.com/) 3D printer.
 
 `pycentauri` speaks the printer's native SDCP v3 protocol over its local
-WebSocket (port 3030) — no cloud account required. It exposes three surfaces:
+WebSocket (port 3030) — no cloud account required. It exposes four surfaces:
 
 1. An **async Python library** for direct integration.
 2. A **`centauri` CLI** for quick status checks, snapshots, and control.
 3. An **MCP server** so AI agents (Claude Code, Claude Desktop, Cursor, any
    MCP-compatible client) can monitor and drive the printer as a tool.
+4. An **HTTP + SSE server** for dashboards, reverse-proxy integration, and
+   anything that wants a plain REST API.
 
 > **Status:** alpha. The protocol has been reverse-engineered from the official
 > [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link) C++ SDK and the
@@ -20,8 +22,10 @@ WebSocket (port 3030) — no cloud account required. It exposes three surfaces:
 ## Install
 
 ```sh
-pip install pycentauri            # library + CLI
-pip install "pycentauri[mcp]"     # + MCP server dependencies
+pip install pycentauri                    # library + CLI
+pip install "pycentauri[mcp]"             # + MCP server
+pip install "pycentauri[server]"          # + HTTP REST/SSE server
+pip install "pycentauri[mcp,server]"      # everything
 ```
 
 ## Quick start — CLI
@@ -72,6 +76,31 @@ async def main():
 
 asyncio.run(main())
 ```
+
+## Quick start — HTTP server
+
+```sh
+# Read-only, bound to loopback so only this box can hit it:
+centauri server --host 192.168.1.209 --port 8787
+
+# Read + write, bound to all interfaces (put a reverse proxy in front):
+centauri server --host 192.168.1.209 --bind 0.0.0.0 --port 8787 --enable-control
+```
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/` | Health + version |
+| `GET` | `/status` | Latest status push (cached; updates every ~5s) |
+| `GET` | `/attributes` | Printer attributes |
+| `GET` | `/snapshot` | `image/jpeg` response |
+| `GET` | `/discover` | LAN scan |
+| `GET` | `/events/status` | Server-Sent Events stream of pushes |
+| `POST` | `/print/start` | Body: `{"filename": "cube.gcode"}`. Requires `--enable-control`. |
+| `POST` | `/print/{pause,resume,stop}` | Requires `--enable-control`. |
+
+The server holds a single long-lived WebSocket to the printer and reuses
+it for every request — no per-request reconnect, and it won't bump into
+the firmware's 5-slot limit.
 
 ## Quick start — MCP
 
