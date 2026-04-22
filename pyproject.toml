@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pycentauri"
-version = "0.3.0"
+version = "0.3.1"
 description = "Python client and MCP server for Elegoo Centauri Carbon 3D printers"
 readme = "README.md"
 license = "Apache-2.0"

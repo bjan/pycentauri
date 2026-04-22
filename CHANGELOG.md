@@ -6,6 +6,21 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-04-22
+
+### Changed
+- **Web UI redesign.** Moved from the generic dark-dashboard look to an
+  industrial instrument-panel aesthetic — amber-on-near-black, viewfinder
+  corner brackets and a faint crosshair over the webcam, ruler-style
+  progress bar with diagonal-hatch fill, tabular-numeric temperature
+  gauges with per-channel setpoint bars, kinematics readout with X/Y/Z
+  cells and fan/Z-offset/mainboard telemetry, keyboard-key-style F1/F2/F3
+  control buttons (with real keyboard shortcuts). Typography: Space Mono
+  for display numerals, IBM Plex Mono for data, IBM Plex Sans Condensed
+  for SCADA-style labels.
+- Webcam MJPEG element now auto-recovers if the stream stalls for 15s.
+- Added a favicon so browsers stop 404-ing `/favicon.ico`.
+
 ## [0.3.0] - 2026-04-22
 
 ### Added

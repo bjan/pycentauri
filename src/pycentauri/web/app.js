@@ -1,29 +1,31 @@
-// pycentauri web UI
-// Consumes /api/info, /status (one-shot), /events/status (SSE), and POSTs to
-// /print/{pause,resume,stop} when control is enabled.
+// pycentauri web console
+// Consumes /api/info, /status, /events/status (SSE), /attributes.
+// Posts to /print/{pause,resume,stop} when --enable-control is on.
 
 const $ = (id) => document.getElementById(id);
 
+// PrintInfo.Status → display label + semantic class.
+// Codes decoded from CentauriLink + official elegoo-link + live observation.
 const PRINT_STATUS = {
-  0:  { label: "idle",       cls: "state-idle" },
-  1:  { label: "homing",     cls: "state-printing" },
-  2:  { label: "dropping",   cls: "state-printing" },
-  3:  { label: "exposing",   cls: "state-printing" },
-  4:  { label: "lifting",    cls: "state-printing" },
-  5:  { label: "pausing",    cls: "state-paused" },
-  6:  { label: "paused",     cls: "state-paused" },
-  7:  { label: "stopping",   cls: "state-stopped" },
-  8:  { label: "stopped",    cls: "state-stopped" },
-  9:  { label: "completed",  cls: "state-idle" },
-  10: { label: "checking",   cls: "state-printing" },
-  12: { label: "preparing",  cls: "state-printing" },
-  13: { label: "printing",   cls: "state-printing" },
-  18: { label: "resumed",    cls: "state-printing" },
+  0:  { label: "IDLE",       cls: "state-idle" },
+  1:  { label: "HOMING",     cls: "state-printing" },
+  2:  { label: "DROPPING",   cls: "state-printing" },
+  3:  { label: "EXPOSING",   cls: "state-printing" },
+  4:  { label: "LIFTING",    cls: "state-printing" },
+  5:  { label: "PAUSING",    cls: "state-paused" },
+  6:  { label: "PAUSED",     cls: "state-paused" },
+  7:  { label: "STOPPING",   cls: "state-stopped" },
+  8:  { label: "STOPPED",    cls: "state-stopped" },
+  9:  { label: "COMPLETED",  cls: "state-completed" },
+  10: { label: "CHECKING",   cls: "state-printing" },
+  12: { label: "PREPARING",  cls: "state-printing" },
+  13: { label: "PRINTING",   cls: "state-printing" },
+  18: { label: "RESUMED",    cls: "state-printing" },
 };
 
 function fmtSeconds(s) {
-  if (s == null || Number.isNaN(s)) return "—";
-  s = Math.max(0, Math.round(s));
+  if (s == null || Number.isNaN(+s)) return "—";
+  s = Math.max(0, Math.round(+s));
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = s % 60;
@@ -32,79 +34,142 @@ function fmtSeconds(s) {
   return `${sec}s`;
 }
 
-function fmtTemp(v) {
-  return (v == null || Number.isNaN(v)) ? "—" : v.toFixed(1);
+function fmtTemp(v, padTo = "---.-") {
+  if (v == null || Number.isNaN(+v)) return padTo;
+  return (+v).toFixed(1);
 }
+
+function fmtCoord(v) {
+  if (v == null || Number.isNaN(+v)) return "---.--";
+  return (+v).toFixed(2).padStart(6, " ");
+}
+
+function tempPct(actual, target) {
+  if (actual == null || target == null || target <= 0) return 0;
+  return Math.min(100, Math.max(0, (actual / target) * 100));
+}
+
+function setStatusPill(kind, label) {
+  const pill = $("status-pill");
+  pill.classList.remove("warn", "err");
+  if (kind === "warn") pill.classList.add("warn");
+  if (kind === "err")  pill.classList.add("err");
+  $("status-text").textContent = label;
+}
+
+// ---------------------------------------------------------------------------
 
 async function loadInfo() {
   try {
     const r = await fetch("/api/info");
-    if (!r.ok) return;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const info = await r.json();
+
     $("version").textContent = info.version || "—";
     $("host").textContent = info.printer_host || "—";
     $("mainboard").textContent = info.mainboard_id || "—";
+    $("mainboard").title = info.mainboard_id || "";
+
     if (info.enable_control) $("controls").hidden = false;
 
     try {
       const attrs = await (await fetch("/attributes")).json();
-      $("printer-name").textContent = attrs.machine_name || attrs.name || "Centauri Carbon";
-      $("firmware").textContent = attrs.firmware_version ? `· ${attrs.firmware_version}` : "";
-    } catch (_) { /* printer may still be warming up */ }
+      $("printer-name").textContent = (attrs.machine_name || attrs.name || "Centauri Carbon").toUpperCase();
+      $("firmware").textContent = attrs.firmware_version ? `FW ${attrs.firmware_version}` : "";
+    } catch (_) { /* firmware may not push in idle */ }
+
+    if (info.connected) {
+      setStatusPill("ok", "LINK OK");
+    } else {
+      setStatusPill("warn", "LINK DOWN");
+    }
   } catch (e) {
+    setStatusPill("err", "SRV OFFLINE");
     console.warn("loadInfo failed:", e);
   }
 }
 
 function renderStatus(raw) {
-  // raw is the printer's Status dict (SDCP payload).
   const pi = raw.PrintInfo || {};
   const pstatus = pi.Status;
-  const filename = pi.Filename || "—";
+  const filename = pi.Filename;
 
-  $("filename").textContent = filename;
+  // Job name
+  $("filename").textContent = filename || "— · AWAITING ·";
 
+  // Progress
   const progress = pi.Progress;
-  $("progress-bar").style.width = (progress != null ? progress : 0) + "%";
-  const layerStr = pi.CurrentLayer != null && pi.TotalLayer
-    ? ` · layer ${pi.CurrentLayer}/${pi.TotalLayer}`
-    : "";
-  $("progress-label").textContent = (progress != null ? progress + "%" : "—") + layerStr;
+  const pct = (progress != null) ? Math.max(0, Math.min(100, +progress)) : 0;
+  $("progress-bar").style.width = pct + "%";
+  $("progress-label").textContent = (progress != null) ? `${pct}%` : "—";
 
+  // State word + code
   const info = PRINT_STATUS[pstatus];
-  const ps = $("print-status");
-  ps.textContent = info ? info.label : (pstatus != null ? `code ${pstatus}` : "—");
-  ps.className = info ? info.cls : "";
+  const sw = $("print-status");
+  const sc = $("print-status-code");
+  sw.classList.remove("state-idle", "state-printing", "state-paused", "state-stopped", "state-completed");
+  if (info) {
+    sw.textContent = info.label;
+    sw.classList.add(info.cls);
+  } else if (pstatus != null) {
+    sw.textContent = `CODE·${pstatus}`;
+  } else {
+    sw.textContent = "—";
+  }
+  sc.textContent = (pstatus != null) ? String(pstatus).padStart(2, "0") : "--";
 
+  // Layer
   $("layer").textContent = (pi.CurrentLayer != null && pi.TotalLayer)
-    ? `${pi.CurrentLayer}/${pi.TotalLayer}` : "—";
+    ? `${pi.CurrentLayer} / ${pi.TotalLayer}`
+    : "—";
 
-  // SDCP Ticks are reported in seconds on this firmware.
+  // Times (CurrentTicks / TotalTicks are seconds on CC firmware)
   const elapsed = pi.CurrentTicks;
   const total = pi.TotalTicks;
   $("elapsed").textContent = fmtSeconds(elapsed);
   $("remaining").textContent = (total != null && elapsed != null)
     ? fmtSeconds(total - elapsed) : "—";
 
-  // Temperatures — firmware gives scalars for actuals and TempTarget* for targets.
-  const noz    = raw.TempOfNozzle,   nozT = raw.TempTargetNozzle;
-  const bed    = raw.TempOfHotbed,   bedT = raw.TempTargetHotbed;
-  const cham   = raw.TempOfBox,      chamT = raw.TempTargetBox;
-  $("t-nozzle").textContent        = fmtTemp(noz);
-  $("t-nozzle-target").textContent = fmtTemp(nozT);
-  $("t-bed").textContent           = fmtTemp(bed);
-  $("t-bed-target").textContent    = fmtTemp(bedT);
-  $("t-chamber").textContent       = fmtTemp(cham);
-  $("t-chamber-target").textContent = fmtTemp(chamT);
+  // Speed %
+  $("speed").textContent = (pi.PrintSpeedPct != null) ? `${pi.PrintSpeedPct}%` : "—";
 
-  if (raw.CurrenCoord) $("position").textContent = raw.CurrenCoord;
-  if (raw.ZOffset != null) $("z-offset").textContent = raw.ZOffset.toFixed(3);
-  if (raw.CurrentFanSpeed) {
-    $("fans").textContent = Object.entries(raw.CurrentFanSpeed)
-      .map(([k, v]) => `${k}=${v}%`).join("  ");
+  // Temperatures
+  const noz  = raw.TempOfNozzle, nozT = raw.TempTargetNozzle;
+  const bed  = raw.TempOfHotbed, bedT = raw.TempTargetHotbed;
+  const cham = raw.TempOfBox,    chamT = raw.TempTargetBox;
+  $("t-nozzle").textContent        = fmtTemp(noz);
+  $("t-nozzle-target").textContent = (nozT != null) ? String(Math.round(+nozT)) : "---";
+  $("t-nozzle-bar").style.width    = tempPct(noz, nozT) + "%";
+  $("t-bed").textContent           = fmtTemp(bed);
+  $("t-bed-target").textContent    = (bedT != null) ? String(Math.round(+bedT)) : "---";
+  $("t-bed-bar").style.width       = tempPct(bed, bedT) + "%";
+  $("t-chamber").textContent       = fmtTemp(cham);
+  $("t-chamber-target").textContent = (chamT != null) ? String(Math.round(+chamT)) : "---";
+  // Chamber often targets 0; show the actual vs a reference of 50°C so the bar conveys warmth.
+  $("t-chamber-bar").style.width   = Math.min(100, Math.max(0, (+(cham ?? 0) / 50) * 100)) + "%";
+
+  // Coords "x,y,z"
+  if (typeof raw.CurrenCoord === "string") {
+    const [x, y, z] = raw.CurrenCoord.split(",");
+    $("pos-x").textContent = fmtCoord(x);
+    $("pos-y").textContent = fmtCoord(y);
+    $("pos-z").textContent = fmtCoord(z);
   }
 
-  $("status-dot").className = "dot ok";
+  // Z offset
+  if (raw.ZOffset != null) $("z-offset").textContent = (+raw.ZOffset).toFixed(3);
+
+  // Fans
+  const fans = raw.CurrentFanSpeed || {};
+  const setFan = (id, key) => {
+    const v = fans[key];
+    $(id).textContent = (v != null) ? `${v}%` : "—";
+  };
+  setFan("fan-model", "ModelFan");
+  setFan("fan-aux",   "AuxiliaryFan");
+  setFan("fan-box",   "BoxFan");
+
+  setStatusPill("ok", "LINK OK");
 }
 
 async function pollOnce() {
@@ -114,17 +179,16 @@ async function pollOnce() {
     const body = await r.json();
     if (body.raw) renderStatus(body.raw);
   } catch (e) {
-    $("status-dot").className = "dot err";
+    setStatusPill("warn", "LINK WAIT");
     console.warn("poll failed:", e);
   }
 }
 
 function connectSSE() {
   let src;
-  try {
-    src = new EventSource("/events/status");
-  } catch (e) {
-    $("status-dot").className = "dot warn";
+  try { src = new EventSource("/events/status"); }
+  catch (_) {
+    setStatusPill("warn", "SSE N/A");
     setInterval(pollOnce, 3000);
     return;
   }
@@ -132,48 +196,87 @@ function connectSSE() {
     try { renderStatus(JSON.parse(ev.data)); } catch (_) {}
   });
   src.onerror = () => {
-    $("status-dot").className = "dot warn";
-    // EventSource auto-reconnects; keep a slow poll as a safety net.
+    setStatusPill("warn", "LINK WAIT");
     setTimeout(pollOnce, 2000);
   };
 }
 
-// --- Controls (only wired when visible) -----------------------------------
+// ---------------------------------------------------------------------------
+// Controls
 
-async function doAction(name, path) {
-  const msg = $("ctrl-msg");
-  msg.textContent = `${name}…`;
-  for (const b of document.querySelectorAll(".controls button")) b.disabled = true;
+function setMsg(text, kind) {
+  const el = $("ctrl-msg");
+  el.classList.remove("ok", "warn", "err");
+  if (kind) el.classList.add(kind);
+  el.textContent = text;
+}
+
+async function doAction(label, path, confirmMsg) {
+  if (confirmMsg && !confirm(confirmMsg)) return;
+  setMsg(`» ${label}…`);
+  const btns = document.querySelectorAll(".controls button");
+  for (const b of btns) b.disabled = true;
   try {
     const r = await fetch(path, { method: "POST" });
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-    msg.textContent = `${name} ✓`;
+    if (!r.ok) throw new Error(`HTTP ${r.status} — ${await r.text()}`);
+    setMsg(`✓ ${label} acknowledged`, "ok");
   } catch (e) {
-    msg.textContent = `${name} failed — ${e.message}`;
+    setMsg(`✗ ${label}: ${e.message}`, "err");
   } finally {
     setTimeout(() => {
-      for (const b of document.querySelectorAll(".controls button")) b.disabled = false;
+      for (const b of btns) b.disabled = false;
     }, 800);
   }
 }
 
 function wireControls() {
-  $("btn-pause").addEventListener("click", () => {
-    if (confirm("Pause the current print?")) doAction("pause", "/print/pause");
-  });
-  $("btn-resume").addEventListener("click", () => doAction("resume", "/print/resume"));
-  $("btn-stop").addEventListener("click", () => {
-    if (confirm("Stop the current print? This cannot be undone.")) doAction("stop", "/print/stop");
+  $("btn-pause")?.addEventListener("click", () =>
+    doAction("PAUSE", "/print/pause", "Pause the current print?")
+  );
+  $("btn-resume")?.addEventListener("click", () =>
+    doAction("RESUME", "/print/resume")
+  );
+  $("btn-stop")?.addEventListener("click", () =>
+    doAction("STOP", "/print/stop",
+      "Stop the current print?\n\nThis cannot be undone.")
+  );
+
+  // Keyboard shortcuts when controls are visible.
+  document.addEventListener("keydown", (ev) => {
+    if ($("controls").hidden) return;
+    if (ev.target && /^(INPUT|TEXTAREA|SELECT)$/.test(ev.target.tagName)) return;
+    if (ev.key === "F1") { ev.preventDefault(); $("btn-pause").click(); }
+    if (ev.key === "F2") { ev.preventDefault(); $("btn-resume").click(); }
+    if (ev.key === "F3") { ev.preventDefault(); $("btn-stop").click(); }
   });
 }
 
-// --- Boot ------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Webcam resilience — if the MJPEG stream stalls, reload it.
+
+function wireWebcamKeepalive() {
+  const img = $("webcam");
+  let lastChange = Date.now();
+  let loads = 0;
+  img.addEventListener("load", () => { lastChange = Date.now(); loads++; });
+  img.addEventListener("error", () => {
+    setTimeout(() => { img.src = `/stream?t=${Date.now()}`; }, 2000);
+  });
+  setInterval(() => {
+    if (Date.now() - lastChange > 15000) {
+      img.src = `/stream?t=${Date.now()}`;
+      lastChange = Date.now();
+    }
+  }, 5000);
+}
+
+// ---------------------------------------------------------------------------
 
 (async function main() {
-  await loadInfo();
   wireControls();
+  wireWebcamKeepalive();
+  await loadInfo();
   await pollOnce();
   connectSSE();
-  // Safety net: refresh info every 60s in case the server was restarted.
   setInterval(loadInfo, 60000);
 })();

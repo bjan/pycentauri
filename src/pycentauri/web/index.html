@@ -2,82 +2,207 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>pycentauri</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>pycentauri · console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap">
   <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0b0d'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ffb347'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%23ffb347' stroke-width='1.5' stroke-dasharray='2 3'/%3E%3C/svg%3E">
 </head>
 <body>
-  <header>
-    <h1>pycentauri</h1>
-    <div id="header-meta">
-      <span id="printer-name">…</span>
-      <span id="firmware"></span>
-      <span id="status-dot" class="dot" title="Connection state"></span>
+  <div class="bg-grid"  aria-hidden="true"></div>
+  <div class="bg-noise" aria-hidden="true"></div>
+
+  <!-- Upper rail -->
+  <nav class="rail rail-top">
+    <div class="rail-group">
+      <span class="logo">◉ PYCENTAURI</span>
+      <span class="rail-sep">/</span>
+      <span class="rail-ver">v<span id="version">—</span></span>
     </div>
-  </header>
+    <div class="rail-group">
+      <span class="rail-dim" id="printer-name">—</span>
+      <span class="rail-sep">·</span>
+      <span class="rail-dim"><span id="firmware">—</span></span>
+      <span class="status-pill" id="status-pill">
+        <span class="status-dot"></span>
+        <span id="status-text">LINK</span>
+      </span>
+    </div>
+  </nav>
 
-  <main>
-    <section class="card webcam">
-      <img id="webcam" alt="Webcam" src="/stream">
-      <a class="snap-link" href="/snapshot" download="snapshot.jpg">Snapshot</a>
+  <main class="console">
+    <!-- LEFT column — viewport + progress + controls -->
+    <section class="viewport-col">
+
+      <!-- Webcam viewport hero -->
+      <div class="viewport" role="img" aria-label="Live webcam feed">
+        <img id="webcam" src="/stream" alt="">
+        <div class="viewport-corners" aria-hidden="true">
+          <span class="corner tl"></span>
+          <span class="corner tr"></span>
+          <span class="corner bl"></span>
+          <span class="corner br"></span>
+        </div>
+        <div class="viewport-crosshair" aria-hidden="true">
+          <span class="ch ch-h"></span>
+          <span class="ch ch-v"></span>
+          <span class="ch-dot"></span>
+        </div>
+        <div class="viewport-scanline" aria-hidden="true"></div>
+        <div class="viewport-overlay top">
+          <span class="ovl">CAM/01</span>
+          <span class="ovl ovl-rec"><span class="rec-dot"></span>LIVE</span>
+        </div>
+        <div class="viewport-overlay bot">
+          <span class="ovl">MJPEG · :3031</span>
+          <a class="snap-btn" href="/snapshot" download="snapshot.jpg">DL · JPG</a>
+        </div>
+      </div>
+
+      <!-- Job progress strip -->
+      <div class="panel job-panel">
+        <header class="panel-header">
+          <span class="panel-tag">JOB</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx">02</span>
+        </header>
+        <div class="job-name" id="filename">— · AWAITING ·</div>
+        <div class="job-track">
+          <div class="ruler" aria-hidden="true"></div>
+          <div class="bar">
+            <div class="bar-fill" id="progress-bar"></div>
+            <div class="bar-label">
+              <span id="progress-label">0%</span>
+            </div>
+          </div>
+          <div class="ruler" aria-hidden="true"></div>
+        </div>
+        <dl class="job-stats">
+          <div><dt>LAYER</dt><dd id="layer">—</dd></div>
+          <div><dt>ELAPSED</dt><dd id="elapsed">—</dd></div>
+          <div><dt>ETA</dt><dd id="remaining">—</dd></div>
+          <div><dt>SPEED</dt><dd id="speed">—</dd></div>
+        </dl>
+      </div>
+
+      <!-- Exec / control -->
+      <div class="panel controls" id="controls" hidden>
+        <header class="panel-header">
+          <span class="panel-tag">EXEC</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx">03</span>
+        </header>
+        <div class="btn-grid">
+          <button id="btn-pause" class="kbd-btn warn" type="button">
+            <span class="kbd-key">F1</span>
+            <span class="kbd-label">PAUSE</span>
+          </button>
+          <button id="btn-resume" class="kbd-btn ok" type="button">
+            <span class="kbd-key">F2</span>
+            <span class="kbd-label">RESUME</span>
+          </button>
+          <button id="btn-stop" class="kbd-btn danger" type="button">
+            <span class="kbd-key">F3</span>
+            <span class="kbd-label">STOP</span>
+          </button>
+        </div>
+        <div class="ctrl-msg" id="ctrl-msg" aria-live="polite"></div>
+      </div>
     </section>
 
-    <section class="card job">
-      <div id="filename" class="filename">—</div>
-      <div class="progress-wrap">
-        <div id="progress-bar" class="progress-bar"></div>
-        <span id="progress-label" class="progress-label">—</span>
-      </div>
-      <div class="job-meta">
-        <div><span class="k">state</span><span id="print-status">—</span></div>
-        <div><span class="k">layer</span><span id="layer">—</span></div>
-        <div><span class="k">elapsed</span><span id="elapsed">—</span></div>
-        <div><span class="k">remaining</span><span id="remaining">—</span></div>
-      </div>
-    </section>
+    <!-- RIGHT column — instruments -->
+    <aside class="instruments-col">
 
-    <section class="temps">
-      <div class="card temp">
-        <div class="k">nozzle</div>
-        <div class="t"><span id="t-nozzle">—</span><span class="unit">°C</span></div>
-        <div class="sub">target <span id="t-nozzle-target">—</span>°C</div>
+      <!-- State -->
+      <div class="panel state-panel">
+        <header class="panel-header">
+          <span class="panel-tag">STATE</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx">01</span>
+        </header>
+        <div class="state-row">
+          <span class="state-code" id="print-status-code">--</span>
+          <span class="state-word" id="print-status">IDLE</span>
+        </div>
       </div>
-      <div class="card temp">
-        <div class="k">bed</div>
-        <div class="t"><span id="t-bed">—</span><span class="unit">°C</span></div>
-        <div class="sub">target <span id="t-bed-target">—</span>°C</div>
-      </div>
-      <div class="card temp">
-        <div class="k">chamber</div>
-        <div class="t"><span id="t-chamber">—</span><span class="unit">°C</span></div>
-        <div class="sub">target <span id="t-chamber-target">—</span>°C</div>
-      </div>
-    </section>
 
-    <section id="controls" class="card controls" hidden>
-      <h2>Control</h2>
-      <div class="btn-row">
-        <button id="btn-pause"  class="btn warn">Pause</button>
-        <button id="btn-resume" class="btn">Resume</button>
-        <button id="btn-stop"   class="btn danger">Stop</button>
+      <!-- Thermals -->
+      <div class="panel thermal-panel">
+        <header class="panel-header">
+          <span class="panel-tag">THERMAL</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx">04</span>
+        </header>
+        <div class="gauges">
+          <div class="gauge" data-id="nozzle">
+            <div class="gauge-head">
+              <span class="gauge-label">NZL</span>
+              <span class="gauge-ref">T-01</span>
+            </div>
+            <div class="gauge-val"><span id="t-nozzle">---.-</span><span class="unit">°C</span></div>
+            <div class="gauge-target">SETPOINT · <span id="t-nozzle-target">---</span>°</div>
+            <div class="gauge-bar"><div class="gauge-fill" id="t-nozzle-bar"></div></div>
+          </div>
+          <div class="gauge" data-id="bed">
+            <div class="gauge-head">
+              <span class="gauge-label">BED</span>
+              <span class="gauge-ref">T-02</span>
+            </div>
+            <div class="gauge-val"><span id="t-bed">---.-</span><span class="unit">°C</span></div>
+            <div class="gauge-target">SETPOINT · <span id="t-bed-target">---</span>°</div>
+            <div class="gauge-bar"><div class="gauge-fill" id="t-bed-bar"></div></div>
+          </div>
+          <div class="gauge" data-id="chamber">
+            <div class="gauge-head">
+              <span class="gauge-label">BOX</span>
+              <span class="gauge-ref">T-03</span>
+            </div>
+            <div class="gauge-val"><span id="t-chamber">---.-</span><span class="unit">°C</span></div>
+            <div class="gauge-target">AMBIENT · <span id="t-chamber-target">---</span>°</div>
+            <div class="gauge-bar"><div class="gauge-fill" id="t-chamber-bar"></div></div>
+          </div>
+        </div>
       </div>
-      <div id="ctrl-msg" class="ctrl-msg"></div>
-    </section>
 
-    <section class="card position">
-      <div class="row"><span class="k">position</span><span id="position">—</span></div>
-      <div class="row"><span class="k">z-offset</span><span id="z-offset">—</span></div>
-      <div class="row"><span class="k">fans</span><span id="fans">—</span></div>
-      <div class="row"><span class="k">mainboard</span><span id="mainboard">—</span></div>
-    </section>
+      <!-- Kinematics + fans -->
+      <div class="panel tele-panel">
+        <header class="panel-header">
+          <span class="panel-tag">KINEMATICS</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx">05</span>
+        </header>
+        <div class="coords">
+          <div class="axis"><span class="axis-lbl">X</span><span class="axis-val" id="pos-x">---.--</span></div>
+          <div class="axis"><span class="axis-lbl">Y</span><span class="axis-val" id="pos-y">---.--</span></div>
+          <div class="axis"><span class="axis-lbl">Z</span><span class="axis-val" id="pos-z">---.--</span></div>
+        </div>
+        <dl class="tele-dl">
+          <div><dt>Z · OFFSET</dt><dd id="z-offset">—</dd></div>
+          <div><dt>FAN · MODEL</dt><dd id="fan-model">—</dd></div>
+          <div><dt>FAN · AUX</dt><dd id="fan-aux">—</dd></div>
+          <div><dt>FAN · CHAMBER</dt><dd id="fan-box">—</dd></div>
+          <div><dt>MAINBOARD</dt><dd class="mono-xs" id="mainboard">—</dd></div>
+        </dl>
+      </div>
+    </aside>
   </main>
 
-  <footer>
-    <span>pycentauri <span id="version">—</span></span>
-    <span>·</span>
-    <span id="host">—</span>
-    <span>·</span>
-    <a href="/docs">API docs</a>
+  <!-- Lower rail -->
+  <footer class="rail rail-bottom">
+    <div class="rail-group">
+      <span class="rail-dim">HOST</span>
+      <span id="host">—</span>
+    </div>
+    <div class="rail-group">
+      <a href="/docs">API · OPENAPI</a>
+      <span class="rail-sep">/</span>
+      <a href="/redoc">REDOC</a>
+      <span class="rail-sep">/</span>
+      <a href="https://github.com/bjan/pycentauri" target="_blank" rel="noopener">SRC</a>
+    </div>
   </footer>
 
   <script src="app.js"></script>
