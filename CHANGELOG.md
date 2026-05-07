@@ -6,6 +6,18 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Documentation
+- `docs/PROTOCOL.md` now documents the printer's internal architecture
+  as observed via SSH on OpenCentauri V0.3.0-o: the `app` binary
+  embeds a Klipper-derived motion stack rather than running it as a
+  separate process, which explains why an `app` crash kills any
+  active print. Adds the log-line signal table for filament cycles
+  (`feed state change`, `M729`, etc.) and the recorded touchscreen
+  tap-event sequence for the Goodix `gt9xxnew_ts` driver.
+- `CLAUDE.md` references the new `oc-auto-dismiss` sidecar project
+  and clarifies that OpenCentauri-only printer-side automation lives
+  outside the pycentauri package on purpose.
+
 ## [0.4.2] - 2026-04-22
 
 ### Changed

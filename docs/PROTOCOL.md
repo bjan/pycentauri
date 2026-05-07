@@ -2,7 +2,33 @@
 
 Hard-won field notes on the original Centauri Carbon's local protocol —
 the kind of information you wish you had before you started reverse
-engineering it. Tested against firmware **V1.1.46**.
+engineering it. Tested against firmware **V1.1.46** (stock) and
+**V0.3.0-o** (OpenCentauri), which share the same `app` binary and are
+indistinguishable at the SDCP layer.
+
+> ## ⚠️ DO NOT PROBE UNKNOWN Cmds WHILE A PRINT IS RUNNING
+>
+> A few unrecognised Cmd codes in quick succession will **crash the
+> printer's `app` daemon entirely**, not just close your WebSocket.
+>
+> On both stock and OpenCentauri, `app` is **the whole printer
+> firmware** — host UI, network layer, file management, and the gcode
+> interpreter. There is no separate Klipper / Marlin / Moonraker layer
+> underneath. When `app` dies, the running print dies with it: motion
+> halts mid-layer, the MCU's watchdog cuts heater power, the screen
+> goes dark, and your part is destroyed.
+>
+> **Probe only when the printer is idle (`PrintInfo.Status == 0`) and
+> the user has explicitly authorised it.** Even read-only commands count
+> if they're not on the confirmed-working list — the firmware doesn't
+> distinguish "harmless query" from "destructive action" before
+> deciding to RST. Always check status first; if anything is being
+> printed, stop and ask.
+>
+> Recovery if it does crash: power-cycle the printer at the wall. `app`
+> re-launches via `/etc/rc.local` at boot. SSH-based hand-restart is
+> possible (`setsid nohup /app/app </dev/null >/tmp/app.log 2>&1 &`)
+> but a power-cycle is faster and clean.
 
 ## Reference projects
 
@@ -15,6 +41,9 @@ engineering it. Tested against firmware **V1.1.46**.
 - [`CentauriLink/Centauri-Link`](https://github.com/CentauriLink/Centauri-Link)
   — Kivy GUI. `main.py` documents the SDCP envelope and OctoEverywhere
   tunnel layer.
+- [`OpenCentauri/cc-fw-tools`](https://github.com/OpenCentauri/cc-fw-tools)
+  — community patched firmware. Adds SSH on port 22 and a debug shell
+  on 4567, but does not modify the `app` daemon at the SDCP layer.
 
 ## Network surface (what the printer exposes)
 
@@ -111,22 +140,35 @@ actually accepts. We have probed and confirmed which work.
 | 324 | `GET_CANVAS_STATUS`     | `{}` | enabled in SDK; not yet exercised by pycentauri |
 | 512 | `SUBSCRIBE`             | `{"TimePeriod": <ms>}` | `Ack=0`, then status pushes |
 
-### Confirmed-broken on V1.1.46
+### Confirmed-broken on V1.1.46 *and* V0.3.0-o (OpenCentauri)
 
 The firmware **silently drops the first one or two** of these and then
-**actively closes the TCP connection** if more arrive in quick succession.
-Probe new candidates with one-Cmd-per-connection plus a `Cmd 0` sanity
-check to be sure.
+**crashes the `app` daemon entirely** when more arrive in quick
+succession. From the network's point of view this looks like a TCP RST
+on the WS connection, but the actual failure mode is much worse:
+the daemon process exits, all three SDCP-related ports (80, 3030, 3031)
+go silent, and any active print is killed (see the warning at the top
+of this doc). Probe new candidates **only on an idle printer**, with
+one-Cmd-per-connection plus a `Cmd 0` sanity check after.
 
 | Cmd | Name | Notes |
 |---|---|---|
-| 258  | `GET_FILE_LIST` (CC code)  | No response, then `RST` |
+| 258  | `GET_FILE_LIST` (CC code)  | No response, then daemon crash |
 | 1044 | `GET_FILE_LIST` (cc2 code) | Same — both Elegoo SDK variants commented out |
 | 320  | `PRINT_TASK_LIST`          | Same |
 | 1036 | `PRINT_TASK_LIST` (cc2)    | Same |
 | 1048 | `GET_DISK_INFO`            | Same |
 
-(Tested 2026-04-22 against firmware V1.1.46.)
+OpenCentauri did **not** patch the SDCP daemon — it's the same
+unmodified Elegoo `app` binary, so the broken-Cmd surface is identical
+to stock. SSH on port 22 and a debug shell on port 4567 are the only
+new things OpenCentauri exposes; for anything filesystem- or
+introspection-related on OpenCentauri printers, prefer SSH over
+attempting unsupported SDCP Cmds.
+
+(First tested 2026-04-22 against firmware V1.1.46. Re-probed
+2026-05-07 against V0.3.0-o (OpenCentauri); identical results, plus
+the daemon-crash mechanism was confirmed via SSH process inspection.)
 
 ### Untested but documented in the SDK
 
@@ -237,16 +279,95 @@ The `pycentauri.models.PrintStatus` class re-exports these as constants;
 the web UI maps them to display labels and color classes in
 `src/pycentauri/web/app.js`.
 
+## Internal architecture (from SSH inspection on OpenCentauri)
+
+Live process inspection on a printer running OpenCentauri V0.3.0-o
+turned up that the proprietary `app` binary is **the entire host-side
+firmware**, including a Klipper-derived motion stack that is *embedded*
+in `app` rather than running as a separate `klippy` process:
+
+```
+/app/app — single ~350MB-resident process serving:
+   :80    HTTP web UI
+   :3030  SDCP control WebSocket
+   :3031  MJPEG webcam HTTP
+plus the embedded Klipper stack (clocksync, verify_heater, gcode,
+change_filament, virtual_sdcard, etc.) which talks to the stm32 +
+strain_gauge_mcu over USB-serial.
+```
+
+`ps` shows no `klippy.py` or `moonraker` process; instead the modules
+log into `/board-resource/log1` with Klipper's familiar
+`[module][line][severity][ts_ms]:body` format. This is why a single
+unsupported SDCP Cmd that crashes `app` also kills the active print —
+there is no second-tier interpreter underneath to keep the gcode
+pipeline alive.
+
+### Useful log signals on OpenCentauri (and likely stock too)
+
+`/board-resource/log1` is plain text and lossy-rotated; tail it for
+real-time printer state without going through SDCP. Notable signals
+observed on V0.3.0-o:
+
+| Signal | Meaning |
+|---|---|
+| `[change_filament][...]:ChangeFilament busy : 1` | filament load/unload cycle started |
+| `[change_filament][...]:ChangeFilament busy : 0` | filament cycle ended |
+| `[app][...]:feed state change : 0 -> 1` | same as `busy : 1` |
+| `[app][...]:feed state change : 1 -> 0` | same as `busy : 0` |
+| `[gcode][...]:single_command<M729>` | **load-specific** gcode (does not fire during unload) |
+| `[gcode][...]:single_command<G1 E120 F240>` | load-direction extrude (positive E) |
+| `[gcode][...]:single_command<SET_MIN_EXTRUDE_TEMP S0>` | unload-specific (lowers extrude-temp gate) |
+| `[verify_heater][...]:Heater extruder approaching new target of 230.000` | load (230 °C) |
+| `[verify_heater][...]:Heater extruder approaching new target of 140.000` | unload (140 °C) |
+| `[print_stats][...]>>>>>> current layer changed :: N,report status` | print progressed to layer N |
+
+The OpenCentauri-only [oc-auto-dismiss
+sidecar](https://github.com/bjan/oc-auto-dismiss)
+(`~/workspace/oc-auto-dismiss/`) uses these signals as its
+detection mechanism for auto-dismissing the load-complete dialog.
+
+### Touchscreen (OpenCentauri only — SSH access required)
+
+| Property | Value |
+|---|---|
+| Device | `/dev/input/event1` |
+| Driver | `gt9xxnew_ts` (Goodix) |
+| Resolution | 480 × 272 logical |
+| Multitouch | Type A (uses `SYN_MT_REPORT`; tracking ID stays at 0 across a held tap, no `-1` lift transition) |
+
+A complete one-finger tap, recorded:
+
+```
+EV_KEY  BTN_TOUCH=1
+EV_ABS  ABS_MT_POSITION_X
+EV_ABS  ABS_MT_POSITION_Y
+EV_ABS  ABS_MT_TOUCH_MAJOR=20
+EV_ABS  ABS_MT_WIDTH_MAJOR=20
+EV_ABS  ABS_MT_TRACKING_ID=0
+EV_SYN  SYN_MT_REPORT
+EV_SYN  SYN_REPORT
+   (held frames, all identical, ~10 ms apart)
+EV_KEY  BTN_TOUCH=0
+EV_SYN  SYN_REPORT
+```
+
+Tap injection works by writing 16-byte `input_event` structs back to
+the same device with root privileges; the Goodix driver doesn't
+distinguish synthetic from physical taps.
+
 ## Operational quirks
 
 - **5 concurrent WebSocket connection limit.** A 6th `connect()` returns
   HTTP 500 with literal body `"too many client"`. Slots release
   immediately on close — there's no cooldown. Confirmed by direct probe
   on 2026-04-22.
-- **Unknown Cmd → silent drop, then `RST`.** Send a few unrecognised
-  Cmds in a row and the firmware tears down the TCP connection. So when
-  exploring, send one new Cmd per connection with a Cmd 0 sanity check
-  to verify the connection survived.
+- **Unknown Cmd → silent drop, then daemon crash** (not just `RST`).
+  See the warning at the top of this doc. The TCP connection going away
+  is just the visible symptom of the entire `app` userland daemon
+  exiting, which kills any active print. Always check
+  `PrintInfo.Status == 0` before sending a command that isn't on the
+  confirmed-working list, and one-Cmd-per-connection during research.
 - **Paused/errored states don't auto-push Attributes.** The first
   Attributes push only happens in idle or printing states. Pre-seed the
   mainboard ID from discovery if you need to issue commands while
@@ -280,7 +401,20 @@ If `pycentauri` worked an hour ago and now hangs:
 3. `curl http://<host>:3031/video -m 1` — confirms camera.
 4. `bash -c 'echo > /dev/tcp/<host>/3030'` — confirms WS port accepts
    TCP.
-5. If 1–4 pass but commands time out: stale connection slot
-   exhaustion. Wait a few minutes for the firmware's TCP TIME_WAIT to
-   clean up. If the printer's SDCP server is wedged after ~5 min,
-   power-cycling is the fastest reset.
+
+If **all of 2, 3, and 4 are dead at once** while `centauri discover`
+still works (UDP), the `app` daemon has crashed — that's a single
+process serving all three TCP ports. Likely cause: an unsupported Cmd
+was sent recently. The print, if any, is gone. Power-cycle to recover
+(`app` is auto-launched by `/etc/rc.local`). SSH (port 22 on
+OpenCentauri, not exposed on stock) lets you confirm the process is
+gone via `ps -ef | grep /app/app` and relaunch by hand:
+
+```sh
+ssh printer "setsid nohup /app/app </dev/null >/tmp/app.log 2>&1 &"
+```
+
+If 1–4 all pass but commands time out: stale connection slot exhaustion
+(the gentler failure mode). Wait a few minutes for the firmware's TCP
+TIME_WAIT to clean up; if the SDCP server is still wedged after ~5
+minutes, power-cycling is the fastest reset.
