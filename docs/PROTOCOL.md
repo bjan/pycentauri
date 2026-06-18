@@ -138,7 +138,18 @@ actually accepts. We have probed and confirmed which work.
 | 130 | `STOP_PRINT`            | `{}` | `Ack=0` |
 | 131 | `RESUME_PRINT`          | `{}` | `Ack=0` |
 | 324 | `GET_CANVAS_STATUS`     | `{}` | enabled in SDK; not yet exercised by pycentauri |
+| 403 | `CHANGE_PRINT_PARAMS` (speed) | `{"PrintSpeedPct": <int>}` | `Ack=0`; `Status.PrintInfo.PrintSpeedPct` updates on next push |
+| 403 | `CHANGE_PRINT_PARAMS` (fans)  | `{"TargetFanSpeed": {"ModelFan": <0..100>, "BoxFan": <0..100>, "AuxiliaryFan": <0..100>}}` | `Ack=0`; fans physically respond within ~1s |
+| 403 | `CHANGE_PRINT_PARAMS` (temps) | `{"TempTargetNozzle": <°C>, "TempTargetHotbed": <°C>, "TempTargetBox": <°C>}` | `Ack=0`; heaters engage and `TempTarget*` updates on next push |
 | 512 | `SUBSCRIBE`             | `{"TimePeriod": <ms>}` | `Ack=0`, then status pushes |
+
+The three `Cmd 403` payload shapes are dispatched by the firmware based
+on which keys are present. You can include only the fields you want to
+change — e.g. `{"TargetFanSpeed": {"ModelFan": 50}}` adjusts the model
+fan without disturbing the others. Verified live on V0.3.0-o on
+2026-06-03 (fan visibly spun, nozzle heated, speed pct reflected on
+push). `pycentauri.Printer.set_print_speed/set_fan_speed/set_temperatures`
+wrap each variant with safety-bound input validation.
 
 ### Confirmed-broken on V1.1.46 *and* V0.3.0-o (OpenCentauri)
 
@@ -180,18 +191,11 @@ is flagged with `// commented out` in the mapping table:
 |---|---|---|
 | 401  | `MOVE_AXES`         | `{"Axis": "X\|Y\|Z", "Step": <mm>}` |
 | 402  | `HOME_AXES`         | `{"Axis": "X\|Y\|Z\|XY\|XYZ"}` |
-| 403  | `SET_TEMPERATURE`   | `{"TempTargetNozzle": <°C>, "TempTargetHotbed": <°C>, "TempTargetBox": <°C>}` |
-| 403  | `SET_FAN_SPEED`     | `{"TargetFanSpeed": {"ModelFan": <0-100>, "BoxFan": <0-100>, "AuxiliaryFan": <0-100>}}` |
-| 403  | `SET_PRINT_SPEED`   | `{"PrintSpeedPct": <int>}` |
-| 403  | `SET_LIGHT`         | (brightness payload) |
+| 403  | `SET_LIGHT`         | (brightness payload — fourth Cmd 403 variant; the speed/fan/temp variants are confirmed working, see above) |
 | 386  | `VIDEO_STREAM`      | (control payload) |
 | 1024 | `LOAD_FILAMENT`     | (TBD) |
 | 1025 | `UNLOAD_FILAMENT`   | (TBD) |
 | 1043 | `SET_PRINTER_NAME`  | `{"Name": "<str>"}` |
-
-Cmd 403 is overloaded — same code, different payload shapes. If 403
-works at all, all four 403 modes likely work (their packet builders
-share the same dispatcher in the SDK).
 
 When you confirm any of these, update this table with the firmware
 version and the date you tested.

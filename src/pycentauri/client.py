@@ -14,7 +14,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from types import TracebackType
-from typing import Any
+from typing import Any, ClassVar
 
 import websockets
 from typing_extensions import Self
@@ -248,6 +248,110 @@ class Printer:
         self._require_control("stop")
         mid = await self.wait_for_mainboard()
         return await self._request(sdcp.Cmd.STOP_PRINT, None, mid)
+
+    #: Canonical ``PrintSpeedPct`` values the Centauri Carbon firmware
+    #: actually responds to. Confirmed by reading the printer's own SPA
+    #: i18n file at ``/app/resources/www/assets/i18n/network-en.json``:
+    #: the speed control there is a discrete 4-option list, not a slider.
+    #: Arbitrary intermediate values (e.g. 120, 145, 200) reach the
+    #: firmware (``Ack=0``) but are silently dropped.
+    PRINT_SPEED_MODES: ClassVar[dict[str, int]] = {
+        "silent": 50,
+        "balanced": 100,
+        "sport": 130,
+        "ludicrous": 160,
+    }
+
+    async def set_print_speed(self, mode: str | int) -> sdcp.ParsedMessage:
+        """Set the print-speed mode.
+
+        Pass either a mode name (``"silent"``, ``"balanced"``, ``"sport"``,
+        ``"ludicrous"``) or its corresponding ``PrintSpeedPct`` value
+        (50, 100, 130, 160). Only those four values are accepted by the
+        firmware — anything else returns ``Ack=0`` but does nothing.
+
+        Only takes effect while a print is actively running; sending it
+        at idle is a no-op even with a canonical value.
+        """
+        self._require_control("set_print_speed")
+        if isinstance(mode, str):
+            key = mode.strip().lower()
+            if key not in self.PRINT_SPEED_MODES:
+                raise ValueError(
+                    f"unknown print mode {mode!r}; expected one of {sorted(self.PRINT_SPEED_MODES)}"
+                )
+            value = self.PRINT_SPEED_MODES[key]
+        else:
+            value = int(mode)
+            if value not in self.PRINT_SPEED_MODES.values():
+                raise ValueError(
+                    f"PrintSpeedPct {value} not in firmware-accepted "
+                    f"set {sorted(self.PRINT_SPEED_MODES.values())}"
+                )
+        mid = await self.wait_for_mainboard()
+        return await self._request(sdcp.Cmd.CHANGE_PRINT_PARAMS, {"PrintSpeedPct": value}, mid)
+
+    async def set_fan_speed(
+        self,
+        *,
+        model: int | None = None,
+        auxiliary: int | None = None,
+        chamber: int | None = None,
+    ) -> sdcp.ParsedMessage:
+        """Set fan speeds (each 0..100, optional; only sets the ones supplied).
+
+        ``chamber`` is the chamber/box fan (firmware key ``BoxFan``). Verified
+        working on V0.3.0-o via ``Cmd 403 {"TargetFanSpeed": {...}}``.
+        """
+        self._require_control("set_fan_speed")
+        speeds: dict[str, int] = {}
+        for label, key, val in (
+            ("model", "ModelFan", model),
+            ("auxiliary", "AuxiliaryFan", auxiliary),
+            ("chamber", "BoxFan", chamber),
+        ):
+            if val is None:
+                continue
+            if not 0 <= int(val) <= 100:
+                raise ValueError(f"fan {label} speed {val} must be 0..100")
+            speeds[key] = int(val)
+        if not speeds:
+            raise ValueError("at least one fan speed must be specified")
+        mid = await self.wait_for_mainboard()
+        return await self._request(sdcp.Cmd.CHANGE_PRINT_PARAMS, {"TargetFanSpeed": speeds}, mid)
+
+    async def set_temperatures(
+        self,
+        *,
+        nozzle: float | None = None,
+        bed: float | None = None,
+        chamber: float | None = None,
+    ) -> sdcp.ParsedMessage:
+        """Set heater target temperatures in °C (each optional).
+
+        Passing 0 turns the corresponding heater off. Verified working on
+        V0.3.0-o via ``Cmd 403 {"TempTargetNozzle/Hotbed/Box": N}``.
+
+        Safety caps: nozzle 0..300, bed 0..110, chamber 0..60. Pycentauri
+        won't issue values outside those bounds even if the firmware
+        would accept them.
+        """
+        self._require_control("set_temperatures")
+        targets: dict[str, float] = {}
+        for label, key, val, lo, hi in (
+            ("nozzle", "TempTargetNozzle", nozzle, 0, 300),
+            ("bed", "TempTargetHotbed", bed, 0, 110),
+            ("chamber", "TempTargetBox", chamber, 0, 60),
+        ):
+            if val is None:
+                continue
+            if not lo <= float(val) <= hi:
+                raise ValueError(f"{label} target {val}°C out of safe range {lo}..{hi}")
+            targets[key] = float(val)
+        if not targets:
+            raise ValueError("at least one temperature target must be specified")
+        mid = await self.wait_for_mainboard()
+        return await self._request(sdcp.Cmd.CHANGE_PRINT_PARAMS, targets, mid)
 
     # --- lifecycle -------------------------------------------------------------
 

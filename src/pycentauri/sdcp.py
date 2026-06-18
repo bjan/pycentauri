@@ -35,7 +35,17 @@ class Cmd(IntEnum):
     PAUSE_PRINT = 129
     STOP_PRINT = 130
     RESUME_PRINT = 131
+    GET_FILE_LIST = 258
+    GET_PRINT_HISTORY = 320
     GET_CANVAS_STATUS = 324
+    # Cmd 403 is overloaded — the payload shape dispatches:
+    # {"PrintSpeedPct": N}                            → set print speed
+    # {"TargetFanSpeed": {"ModelFan":...,"BoxFan":...,"AuxiliaryFan":...}}
+    #                                                 → set fan speeds
+    # {"TempTargetNozzle": N, "TempTargetHotbed": N, "TempTargetBox": N}
+    #                                                 → set heater targets
+    # Confirmed live against firmware V0.3.0-o on 2026-06-03.
+    CHANGE_PRINT_PARAMS = 403
     SUBSCRIBE = 512
 
 

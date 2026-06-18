@@ -247,3 +247,66 @@ async def test_control_enabled_sends_commands(monkeypatch: pytest.MonkeyPatch) -
 
         cmds = [m["Data"]["Cmd"] for m in server.received]
         assert int(Cmd.PAUSE_PRINT) in cmds
+
+
+async def test_adjust_methods_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with _fake_printer() as server:
+        monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+        async with await Printer.connect("127.0.0.1", enable_control=True) as printer:
+            await asyncio.wait_for(printer.wait_for_mainboard(), timeout=2)
+
+            await asyncio.wait_for(printer.set_print_speed("sport"), timeout=3)
+            await asyncio.wait_for(printer.set_print_speed(100), timeout=3)
+            await asyncio.wait_for(printer.set_fan_speed(model=50, chamber=25), timeout=3)
+            await asyncio.wait_for(printer.set_temperatures(nozzle=210, bed=60), timeout=3)
+
+        sent = [m["Data"] for m in server.received if m["Data"]["Cmd"] == 403]
+        assert len(sent) == 4
+        speed_named, speed_int, fan, temp = sent
+        assert speed_named["Data"] == {"PrintSpeedPct": 130}
+        assert speed_int["Data"] == {"PrintSpeedPct": 100}
+        assert fan["Data"] == {"TargetFanSpeed": {"ModelFan": 50, "BoxFan": 25}}
+        assert temp["Data"] == {"TempTargetNozzle": 210.0, "TempTargetHotbed": 60.0}
+
+
+async def test_adjust_validation_rejects_out_of_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _fake_printer() as server:
+        monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+        async with await Printer.connect("127.0.0.1", enable_control=True) as printer:
+            await asyncio.wait_for(printer.wait_for_mainboard(), timeout=2)
+
+            import pytest as _pt
+
+            with _pt.raises(ValueError):
+                await printer.set_print_speed(120)  # not a canonical mode value
+            with _pt.raises(ValueError):
+                await printer.set_print_speed("turbo")  # unknown mode name
+            with _pt.raises(ValueError):
+                await printer.set_fan_speed(model=150)
+            with _pt.raises(ValueError):
+                await printer.set_temperatures(nozzle=400)
+            with _pt.raises(ValueError):
+                await printer.set_fan_speed()
+            with _pt.raises(ValueError):
+                await printer.set_temperatures()
+
+
+async def test_adjust_disabled_without_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pycentauri.client import ControlDisabledError
+
+    async with _fake_printer() as server:
+        monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+        async with await Printer.connect("127.0.0.1") as printer:
+            await asyncio.wait_for(printer.wait_for_mainboard(), timeout=2)
+            for call in (
+                lambda: printer.set_print_speed(100),
+                lambda: printer.set_fan_speed(model=50),
+                lambda: printer.set_temperatures(nozzle=200),
+            ):
+                try:
+                    await call()
+                except ControlDisabledError:
+                    continue
+                raise AssertionError("expected ControlDisabledError")

@@ -162,7 +162,6 @@ body {
   background: var(--rule-soft);
   position: relative;
   z-index: 1;
-  min-height: 0;
 }
 
 .viewport-col,
@@ -710,6 +709,124 @@ body {
 .ctrl-msg.ok   { border-left-color: var(--ok);     color: var(--ok); }
 .ctrl-msg.warn { border-left-color: var(--warn);   color: var(--warn); }
 .ctrl-msg.err  { border-left-color: var(--danger); color: var(--danger); }
+
+/* ---- Adjust panel (Cmd 403 family) ------------------------ */
+
+.panel.adjust { padding-bottom: 14px; }
+
+.adj-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 64px auto;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.adj-lbl {
+  font-family: var(--f-label);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  color: var(--fg-dim);
+}
+.adj-lbl .adj-unit {
+  color: var(--fg-faint);
+  margin-left: 4px;
+  font-weight: 400;
+}
+
+.adj-sub {
+  margin: 16px 0 -2px;
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--rule);
+  font-family: var(--f-label);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  color: var(--amber-deep);
+}
+
+.adj-row input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  background: var(--bg-inset);
+  border: 1px solid var(--rule);
+  border-radius: 0;
+  outline: none;
+}
+.adj-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 18px;
+  background: var(--amber);
+  border: 1px solid var(--amber-deep);
+  cursor: pointer;
+  border-radius: 0;
+}
+.adj-row input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 18px;
+  background: var(--amber);
+  border: 1px solid var(--amber-deep);
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.adj-row input[type="number"] {
+  background: var(--bg-inset);
+  border: 1px solid var(--rule);
+  color: var(--fg);
+  font-family: var(--f-mono);
+  font-size: 13px;
+  text-align: right;
+  padding: 6px 8px;
+  width: 100%;
+  border-radius: 0;
+  outline: none;
+  -moz-appearance: textfield;
+}
+.adj-row input[type="number"]::-webkit-outer-spin-button,
+.adj-row input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.adj-row input[type="number"]:focus,
+.adj-row input[type="range"]:focus {
+  border-color: var(--amber);
+}
+
+.adj-row .adj-apply {
+  padding: 8px 10px;
+  border-bottom-width: 2px;
+}
+.adj-row .adj-apply .kbd-label {
+  font-size: 11px;
+  letter-spacing: 0.18em;
+}
+
+#adj-msg { margin-top: 14px; }
+
+.adj-modes {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+.adj-modes .adj-mode {
+  padding: 10px 6px;
+  border-bottom-width: 2px;
+}
+.adj-modes .adj-mode .kbd-key { font-size: 10px; color: var(--fg-faint); }
+.adj-modes .adj-mode .kbd-label { font-size: 10.5px; letter-spacing: 0.14em; }
+.adj-modes .adj-mode.active {
+  border-color: var(--amber);
+  color: var(--amber);
+  background: #1a1812;
+}
+.adj-modes .adj-mode.active .kbd-key { color: var(--amber-deep); }
 
 /* ---- RTSP panel ------------------------------------------- */
 

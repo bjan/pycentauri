@@ -1,6 +1,7 @@
 // pycentauri web console
 // Consumes /api/info, /status, /events/status (SSE), /attributes.
-// Posts to /print/{pause,resume,stop} when --enable-control is on.
+// Posts to /print/{pause,resume,stop} and /print/{speed,fan,temperature}
+// when --enable-control is on.
 
 const $ = (id) => document.getElementById(id);
 
@@ -86,7 +87,10 @@ async function loadInfo() {
     $("mainboard").textContent = info.mainboard_id || "—";
     $("mainboard").title = info.mainboard_id || "";
 
-    if (info.enable_control) $("controls").hidden = false;
+    if (info.enable_control) {
+      $("controls").hidden = false;
+      $("adjust").hidden = false;
+    }
 
     try {
       const attrs = await (await fetch("/attributes")).json();
@@ -151,6 +155,11 @@ function renderStatus(raw) {
 
   // Speed %
   $("speed").textContent = (pi.PrintSpeedPct != null) ? `${pi.PrintSpeedPct}%` : "—";
+  reflectSpeedMode(pi.PrintSpeedPct);
+
+  // Hydrate ADJUST controls from live values + retune poll cadence.
+  hydrateAdjust(raw);
+  noteStatusForPoll(pstatus);
 
   // Temperatures
   const noz  = raw.TempOfNozzle, nozT = raw.TempTargetNozzle;
@@ -208,15 +217,17 @@ function connectSSE() {
   try { src = new EventSource("/events/status"); }
   catch (_) {
     setStatusPill("warn", "SSE N/A");
-    setInterval(pollOnce, 3000);
     return;
   }
   src.addEventListener("status", (ev) => {
     try { renderStatus(JSON.parse(ev.data)); } catch (_) {}
   });
+  // SSE in Firefox is prone to silent stalls — the connection appears
+  // open but no events arrive. `onerror` fires once and the browser's
+  // auto-reconnect doesn't always kick in. The pollOnce safety net in
+  // main() compensates regardless; here we just surface the wait state.
   src.onerror = () => {
     setStatusPill("warn", "LINK WAIT");
-    setTimeout(pollOnce, 2000);
   };
 }
 
@@ -268,6 +279,166 @@ function wireControls() {
     if (ev.key === "F2") { ev.preventDefault(); $("btn-resume").click(); }
     if (ev.key === "F3") { ev.preventDefault(); $("btn-stop").click(); }
   });
+}
+
+// ---------------------------------------------------------------------------
+// Live adjust (Cmd 403 family) — print speed, fan, temperature
+
+function setAdjMsg(text, kind) {
+  const el = $("adj-msg");
+  el.classList.remove("ok", "warn", "err");
+  if (kind) el.classList.add(kind);
+  el.textContent = text || "";
+}
+
+// Two-way bind a slider/number pair sharing a base id (`${base}` for number,
+// `${base}-slider` for slider). Returns a getter for the current value.
+function bindPair(base) {
+  const num = $(`adj-${base}`);
+  const slider = $(`adj-${base}-slider`);
+  if (!num || !slider) return () => 0;
+  const clamp = (v) =>
+    Math.max(+num.min, Math.min(+num.max, Number.isFinite(+v) ? +v : 0));
+  slider.addEventListener("input", () => { num.value = String(clamp(slider.value)); });
+  num.addEventListener("input", () => { slider.value = String(clamp(num.value)); });
+  return () => clamp(num.value);
+}
+
+const ADJUST_TARGETS = {
+  "fan-model": {
+    label: "MODEL FAN",
+    path: "/print/fan",
+    build: (g) => ({ model: g("fan-model") }),
+  },
+  "fan-aux": {
+    label: "AUX FAN",
+    path: "/print/fan",
+    build: (g) => ({ auxiliary: g("fan-aux") }),
+  },
+  "fan-chamber": {
+    label: "CHAMBER FAN",
+    path: "/print/fan",
+    build: (g) => ({ chamber: g("fan-chamber") }),
+  },
+  "temp-nozzle": {
+    label: "NOZZLE TEMP",
+    path: "/print/temperature",
+    build: (g) => ({ nozzle: g("temp-nozzle") }),
+    confirm: (g) => g("temp-nozzle") > 240
+      ? `Set nozzle target to ${g("temp-nozzle")}°C ? High-temp; check filament rating.`
+      : null,
+  },
+  "temp-bed": {
+    label: "BED TEMP",
+    path: "/print/temperature",
+    build: (g) => ({ bed: g("temp-bed") }),
+    confirm: (g) => g("temp-bed") > 85
+      ? `Set bed target to ${g("temp-bed")}°C ? High-temp; check bed adhesive.`
+      : null,
+  },
+  "temp-chamber": {
+    label: "CHAMBER TEMP",
+    path: "/print/temperature",
+    build: (g) => ({ chamber: g("temp-chamber") }),
+  },
+};
+
+async function applyAdjust(target, getters) {
+  const spec = ADJUST_TARGETS[target];
+  if (!spec) return;
+  const get = (k) => getters[k] ? getters[k]() : 0;
+  const confirmMsg = spec.confirm ? spec.confirm(get) : null;
+  if (confirmMsg && !confirm(confirmMsg)) return;
+
+  setAdjMsg(`» ${spec.label}…`);
+  const btns = document.querySelectorAll("#adjust .kbd-btn");
+  for (const b of btns) b.disabled = true;
+
+  try {
+    const r = await fetch(spec.path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(spec.build(get)),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status} — ${await r.text()}`);
+    setAdjMsg(`✓ ${spec.label} acknowledged`, "ok");
+  } catch (e) {
+    setAdjMsg(`✗ ${spec.label}: ${e.message}`, "err");
+  } finally {
+    setTimeout(() => { for (const b of btns) b.disabled = false; }, 600);
+  }
+}
+
+// Hydrate the ADJUST sliders/inputs from a status push. Skips any control
+// that currently has focus (so a live SSE update doesn't yank a value out
+// from under the user mid-drag or mid-type).
+function hydrateAdjust(raw) {
+  if (!$("adjust")) return;
+  const fans = raw.CurrentFanSpeed || {};
+  const targets = [
+    ["fan-model",    fans.ModelFan],
+    ["fan-aux",      fans.AuxiliaryFan],
+    ["fan-chamber",  fans.BoxFan],
+    ["temp-nozzle",  raw.TempTargetNozzle],
+    ["temp-bed",     raw.TempTargetHotbed],
+    ["temp-chamber", raw.TempTargetBox],
+  ];
+  for (const [base, v] of targets) {
+    if (v == null) continue;
+    const num = $(`adj-${base}`);
+    const slider = $(`adj-${base}-slider`);
+    if (!num || !slider) continue;
+    if (document.activeElement === num || document.activeElement === slider) continue;
+    const rounded = String(Math.round(+v));
+    num.value = rounded;
+    slider.value = rounded;
+  }
+}
+
+async function applySpeedMode(mode) {
+  setAdjMsg(`» SPEED MODE → ${mode.toUpperCase()}…`);
+  const btns = document.querySelectorAll("#adjust .kbd-btn");
+  for (const b of btns) b.disabled = true;
+  try {
+    const r = await fetch("/print/speed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status} — ${await r.text()}`);
+    setAdjMsg(`✓ SPEED MODE → ${mode.toUpperCase()} acknowledged · only effective mid-print`, "ok");
+  } catch (e) {
+    setAdjMsg(`✗ SPEED MODE: ${e.message}`, "err");
+  } finally {
+    setTimeout(() => { for (const b of btns) b.disabled = false; }, 600);
+  }
+}
+
+// Visually highlight the mode that matches the live PrintSpeedPct.
+function reflectSpeedMode(pct) {
+  if (pct == null) return;
+  for (const btn of document.querySelectorAll("#adj-speed-modes .adj-mode")) {
+    const v = { silent: 50, balanced: 100, sport: 130, ludicrous: 160 }[btn.dataset.mode];
+    btn.classList.toggle("active", +pct === v);
+  }
+}
+
+function wireAdjust() {
+  if (!$("adjust")) return;
+  const getters = {
+    "fan-model":     bindPair("fan-model"),
+    "fan-aux":       bindPair("fan-aux"),
+    "fan-chamber":   bindPair("fan-chamber"),
+    "temp-nozzle":   bindPair("temp-nozzle"),
+    "temp-bed":      bindPair("temp-bed"),
+    "temp-chamber":  bindPair("temp-chamber"),
+  };
+  for (const btn of document.querySelectorAll("#adjust .adj-apply")) {
+    btn.addEventListener("click", () => applyAdjust(btn.dataset.target, getters));
+  }
+  for (const btn of document.querySelectorAll("#adj-speed-modes .adj-mode")) {
+    btn.addEventListener("click", () => applySpeedMode(btn.dataset.mode));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,8 +576,41 @@ function wireWebcamKeepalive() {
 
 // ---------------------------------------------------------------------------
 
+// Adaptive backup poll. SSE is the primary update path; this poll keeps
+// the UI alive when SSE silently stalls (Firefox in particular). Rate
+// follows the printer's state: fast while actively printing, slow when
+// idle/paused/done/errored, so we're not hammering the firmware at
+// 2 Hz when nothing is happening.
+const IDLE_STATUSES = new Set([0, 6, 8, 9, 14]); // idle, paused, stopped, completed, error
+const POLL_FAST_MS = 2000;
+const POLL_SLOW_MS = 10000;
+let pollTimer = null;
+let lastPrintStatus = null;
+
+function pollIntervalMs() {
+  return (lastPrintStatus != null && !IDLE_STATUSES.has(lastPrintStatus))
+    ? POLL_FAST_MS : POLL_SLOW_MS;
+}
+
+function schedulePoll() {
+  if (pollTimer) clearTimeout(pollTimer);
+  pollTimer = setTimeout(async () => {
+    await pollOnce();
+    schedulePoll();
+  }, pollIntervalMs());
+}
+
+function noteStatusForPoll(pstatus) {
+  const prev = lastPrintStatus;
+  lastPrintStatus = pstatus;
+  const wasActive = prev != null && !IDLE_STATUSES.has(prev);
+  const nowActive = pstatus != null && !IDLE_STATUSES.has(pstatus);
+  if (wasActive !== nowActive) schedulePoll(); // retune immediately
+}
+
 (async function main() {
   wireControls();
+  wireAdjust();
   wireRtsp();
   wireWebcamKeepalive();
   await loadInfo();
@@ -416,4 +620,5 @@ function wireWebcamKeepalive() {
   setInterval(loadInfo, 60000);
   // RTSP state changes are external, poll occasionally.
   setInterval(loadRtsp, 8000);
+  schedulePoll();
 })();

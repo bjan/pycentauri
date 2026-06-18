@@ -20,6 +20,8 @@ Surfaces (register with ``centauri server``):
 * ``GET /events/status`` — Server-Sent Events stream of live status pushes
 * ``POST /print/{start,pause,resume,stop}`` — only registered when the
   server is launched with ``--enable-control``.
+* ``POST /print/{speed,fan,temperature}`` — runtime adjust of print speed,
+  fan speeds, and heater targets. Same ``--enable-control`` gate.
 """
 
 from __future__ import annotations
@@ -222,6 +224,30 @@ class StartPrintBody(BaseModel):
     storage: str = Field("local", description="'local' or 'udisk'.")
     auto_leveling: bool = True
     timelapse: bool = False
+
+
+class PrintSpeedBody(BaseModel):
+    """Print-speed mode. Firmware accepts only 4 discrete values."""
+
+    mode: str | int = Field(
+        ...,
+        description=(
+            "Mode name ('silent'|'balanced'|'sport'|'ludicrous') or "
+            "the corresponding PrintSpeedPct value (50|100|130|160)."
+        ),
+    )
+
+
+class FanSpeedBody(BaseModel):
+    model: int | None = Field(None, ge=0, le=100)
+    auxiliary: int | None = Field(None, ge=0, le=100)
+    chamber: int | None = Field(None, ge=0, le=100)
+
+
+class TemperatureBody(BaseModel):
+    nozzle: float | None = Field(None, ge=0, le=300)
+    bed: float | None = Field(None, ge=0, le=110)
+    chamber: float | None = Field(None, ge=0, le=60)
 
 
 # --- Dependency helpers -----------------------------------------------------
@@ -562,6 +588,48 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             result = await manager.printer.stop()
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        return {"ok": True, "response": result.inner}
+
+    @app.post("/print/speed", tags=["control"])
+    async def set_speed(
+        body: PrintSpeedBody, manager: PrinterManager = Depends(require_control)
+    ) -> dict[str, Any]:
+        try:
+            result = await manager.printer.set_print_speed(body.mode)
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        return {"ok": True, "response": result.inner}
+
+    @app.post("/print/fan", tags=["control"])
+    async def set_fan(
+        body: FanSpeedBody, manager: PrinterManager = Depends(require_control)
+    ) -> dict[str, Any]:
+        try:
+            result = await manager.printer.set_fan_speed(
+                model=body.model,
+                auxiliary=body.auxiliary,
+                chamber=body.chamber,
+            )
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        return {"ok": True, "response": result.inner}
+
+    @app.post("/print/temperature", tags=["control"])
+    async def set_temperature(
+        body: TemperatureBody, manager: PrinterManager = Depends(require_control)
+    ) -> dict[str, Any]:
+        try:
+            result = await manager.printer.set_temperatures(
+                nozzle=body.nozzle, bed=body.bed, chamber=body.chamber
+            )
+        except ValueError as err:
+            raise HTTPException(status_code=400, detail=str(err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}

@@ -111,6 +111,85 @@
         </div>
         <div class="ctrl-msg" id="ctrl-msg" aria-live="polite"></div>
       </div>
+
+      <!-- Live-adjust panel (Cmd 403 family) -->
+      <div class="panel adjust" id="adjust" hidden>
+        <header class="panel-header">
+          <span class="panel-tag">ADJUST</span>
+          <span class="panel-rule"></span>
+          <span class="panel-idx">07</span>
+        </header>
+
+        <div class="adj-sub">SPEED MODE · ACTIVE PRINT ONLY</div>
+        <div class="adj-modes" id="adj-speed-modes">
+          <button class="kbd-btn adj-mode" data-mode="silent"    type="button">
+            <span class="kbd-key">50%</span><span class="kbd-label">SILENT</span>
+          </button>
+          <button class="kbd-btn adj-mode" data-mode="balanced"  type="button">
+            <span class="kbd-key">100%</span><span class="kbd-label">BALANCED</span>
+          </button>
+          <button class="kbd-btn adj-mode" data-mode="sport"     type="button">
+            <span class="kbd-key">130%</span><span class="kbd-label">SPORT</span>
+          </button>
+          <button class="kbd-btn adj-mode" data-mode="ludicrous" type="button">
+            <span class="kbd-key">160%</span><span class="kbd-label">LUDICROUS</span>
+          </button>
+        </div>
+
+        <div class="adj-sub">FANS · 0–100%</div>
+        <div class="adj-row">
+          <label class="adj-lbl" for="adj-fan-model">MODEL</label>
+          <input type="range" id="adj-fan-model-slider" min="0" max="100" step="1" value="0">
+          <input type="number" id="adj-fan-model" min="0" max="100" step="1" value="0">
+          <button class="kbd-btn adj-apply" data-target="fan-model" type="button">
+            <span class="kbd-label">APPLY</span>
+          </button>
+        </div>
+        <div class="adj-row">
+          <label class="adj-lbl" for="adj-fan-aux">AUX</label>
+          <input type="range" id="adj-fan-aux-slider" min="0" max="100" step="1" value="0">
+          <input type="number" id="adj-fan-aux" min="0" max="100" step="1" value="0">
+          <button class="kbd-btn adj-apply" data-target="fan-aux" type="button">
+            <span class="kbd-label">APPLY</span>
+          </button>
+        </div>
+        <div class="adj-row">
+          <label class="adj-lbl" for="adj-fan-chamber">CHAMBER</label>
+          <input type="range" id="adj-fan-chamber-slider" min="0" max="100" step="1" value="0">
+          <input type="number" id="adj-fan-chamber" min="0" max="100" step="1" value="0">
+          <button class="kbd-btn adj-apply" data-target="fan-chamber" type="button">
+            <span class="kbd-label">APPLY</span>
+          </button>
+        </div>
+
+        <div class="adj-sub">HEATERS · 0 = OFF</div>
+        <div class="adj-row">
+          <label class="adj-lbl" for="adj-temp-nozzle">NOZZLE <span class="adj-unit">°C</span></label>
+          <input type="range" id="adj-temp-nozzle-slider" min="0" max="300" step="5" value="0">
+          <input type="number" id="adj-temp-nozzle" min="0" max="300" step="1" value="0">
+          <button class="kbd-btn adj-apply" data-target="temp-nozzle" type="button">
+            <span class="kbd-label">APPLY</span>
+          </button>
+        </div>
+        <div class="adj-row">
+          <label class="adj-lbl" for="adj-temp-bed">BED <span class="adj-unit">°C</span></label>
+          <input type="range" id="adj-temp-bed-slider" min="0" max="110" step="5" value="0">
+          <input type="number" id="adj-temp-bed" min="0" max="110" step="1" value="0">
+          <button class="kbd-btn adj-apply" data-target="temp-bed" type="button">
+            <span class="kbd-label">APPLY</span>
+          </button>
+        </div>
+        <div class="adj-row">
+          <label class="adj-lbl" for="adj-temp-chamber">CHAMBER <span class="adj-unit">°C</span></label>
+          <input type="range" id="adj-temp-chamber-slider" min="0" max="60" step="1" value="0">
+          <input type="number" id="adj-temp-chamber" min="0" max="60" step="1" value="0">
+          <button class="kbd-btn adj-apply" data-target="temp-chamber" type="button">
+            <span class="kbd-label">APPLY</span>
+          </button>
+        </div>
+
+        <div class="ctrl-msg" id="adj-msg" aria-live="polite"></div>
+      </div>
     </section>
 
     <!-- RIGHT column — instruments -->

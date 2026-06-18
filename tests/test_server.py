@@ -97,6 +97,59 @@ async def test_control_endpoints_registered_when_enabled(monkeypatch: pytest.Mon
     await server.stop()
 
 
+async def test_adjust_endpoints_registered_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    app = server_module.create_app("127.0.0.1", enable_control=True, mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.post("/print/speed", json={"mode": "sport"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        r = await client.post("/print/fan", json={"model": 30, "chamber": 50})
+        assert r.status_code == 200
+
+        r = await client.post("/print/temperature", json={"nozzle": 200, "bed": 55})
+        assert r.status_code == 200
+
+        # No-target → 400 from the library
+        r = await client.post("/print/fan", json={})
+        assert r.status_code == 400
+
+        # Pydantic-level bounds (≥0, ≤100) → 422
+        r = await client.post("/print/fan", json={"model": 150})
+        assert r.status_code == 422
+
+    from pycentauri.sdcp import Cmd as _Cmd
+
+    sent = [m["Data"] for m in server.received if m["Data"]["Cmd"] == int(_Cmd.CHANGE_PRINT_PARAMS)]
+    assert len(sent) == 3
+    speed, fan, temp = sent
+    assert speed["Data"] == {"PrintSpeedPct": 130}
+    assert fan["Data"] == {"TargetFanSpeed": {"ModelFan": 30, "BoxFan": 50}}
+    assert temp["Data"] == {"TempTargetNozzle": 200.0, "TempTargetHotbed": 55.0}
+    await server.stop()
+
+
+async def test_adjust_endpoints_404_without_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        for path in ("/print/speed", "/print/fan", "/print/temperature"):
+            r = await client.post(path, json={})
+            assert r.status_code == 404, path
+    await server.stop()
+
+
 async def test_rtsp_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _FakePrinter()
     await server.start()

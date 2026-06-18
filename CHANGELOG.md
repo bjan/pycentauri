@@ -6,17 +6,71 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-17
+
+### Added
+- **Live print-parameter adjust (`Cmd 403` family).** All three payload
+  variants confirmed working against firmware V0.3.0-o:
+  - `Printer.set_print_speed(mode)` — sets the printer's speed mode.
+    Accepts a name (`"silent"`, `"balanced"`, `"sport"`, `"ludicrous"`)
+    or its canonical `PrintSpeedPct` value (`50`, `100`, `130`, `160`).
+    Only those four values are accepted by the firmware — arbitrary
+    intermediate percentages return `Ack=0` but are silently dropped,
+    and the mode change only takes effect while a print is actively
+    running. Names + values lifted directly from the printer's own
+    SPA i18n file at `/app/resources/www/assets/i18n/network-en.json`.
+  - `Printer.set_fan_speed(model=, auxiliary=, chamber=)` — set any
+    subset of the model / auxiliary / chamber fan (0..100% each).
+  - `Printer.set_temperatures(nozzle=, bed=, chamber=)` — heater
+    targets with safety caps (nozzle 0..300, bed 0..110, chamber 0..60).
+    `0` turns the heater off.
+- HTTP endpoints (only when launched with `--enable-control`):
+  `POST /print/speed`, `POST /print/fan`, `POST /print/temperature`.
+  Speed body: `{"mode": "silent|balanced|sport|ludicrous"}` (or the
+  integer equivalent).
+- Web UI `ADJUST` panel with three sections: a 4-button speed-mode
+  selector (the active mode pulses amber based on live status), per-fan
+  rows (model / aux / chamber, 0–100%), and per-heater rows with
+  per-row APPLY buttons and confirm prompts on high temps
+  (nozzle > 240 °C, bed > 85 °C).
+- Web UI auto-hydrates the fan/heater sliders + inputs from each status
+  push, so they always start at the printer's actual live values
+  instead of zero. Controls that are currently focused are skipped so
+  the live update doesn't yank a value out from under a drag/type.
+- Adaptive backup poll: 2-second cadence while the printer is actively
+  printing, 10-second cadence when idle/paused/done/errored. Switches
+  immediately on state transition. SSE remains the primary update
+  path; the poll is a safety net for Firefox's silent SSE stalls.
+- `sdcp.Cmd.CHANGE_PRINT_PARAMS = 403` enum entry, plus the previously-
+  unenumerated `GET_FILE_LIST = 258` and `GET_PRINT_HISTORY = 320` for
+  reference (no client methods yet — exposing those is queued for a
+  later release).
+- `Printer.PRINT_SPEED_MODES` class-level map exposing the canonical
+  `{mode_name: PrintSpeedPct}` table for callers that want to render
+  their own mode picker.
+
+### Fixed
+- **Footer rail no longer overlaps the ADJUST panel on tall pages.**
+  Removing the `min-height: 0` on `.console` lets the grid grow with
+  its content (instead of being constrained to the body's flex slot),
+  so the bottom rail reflows below the panel instead of hovering over
+  it.
+- **Web UI status now stays fresh in Firefox.** SSE remains the
+  primary push path, but the new adaptive backup poll runs in parallel
+  — Firefox occasionally drops the SSE stream silently and previously
+  required a manual refresh to update; the poll keeps the progress
+  bar, temps, fan readings, and ADJUST hydration live regardless.
+
 ### Documentation
-- `docs/PROTOCOL.md` now documents the printer's internal architecture
-  as observed via SSH on OpenCentauri V0.3.0-o: the `app` binary
+- `docs/PROTOCOL.md` promotes Cmd 403 (all three payload variants) to
+  the confirmed-working table, documents the four canonical
+  `PrintSpeedPct` values, captures the printer's internal architecture
+  as observed via SSH on OpenCentauri V0.3.0-o (the `app` binary
   embeds a Klipper-derived motion stack rather than running it as a
   separate process, which explains why an `app` crash kills any
-  active print. Adds the log-line signal table for filament cycles
-  (`feed state change`, `M729`, etc.) and the recorded touchscreen
+  active print), adds the log-line signal table for filament cycles
+  (`feed state change`, `M729`, etc.), and the recorded touchscreen
   tap-event sequence for the Goodix `gt9xxnew_ts` driver.
-- `CLAUDE.md` references the new `oc-auto-dismiss` sidecar project
-  and clarifies that OpenCentauri-only printer-side automation lives
-  outside the pycentauri package on purpose.
 
 ## [0.4.2] - 2026-04-22
 
