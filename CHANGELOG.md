@@ -6,6 +6,27 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-17
+
+### Added
+- **CLI parity with the new live-adjust API.** Three new top-level
+  commands matching the library and HTTP surfaces shipped in 0.5.0:
+  - `centauri speed <silent|balanced|sport|ludicrous|50|100|130|160>`
+  - `centauri fan [--model N] [--aux N] [--chamber N]`
+  - `centauri temp [--nozzle N] [--bed N] [--chamber N]`
+  All require `--enable-control` and accept any subset of fan/heater
+  flags (omitted axes are left untouched).
+- **MCP tool parity:** three new tools (only registered with
+  `--enable-control`) — `set_print_speed`, `set_fan_speed`,
+  `set_temperatures`. Same shapes as the HTTP endpoints; not marked
+  "DESTRUCTIVE" because live runtime adjustment is their entire
+  purpose.
+
+### Fixed
+- 0.5.0 shipped the live-adjust API to the library, HTTP server, and
+  web UI but missed the CLI and MCP server. This release closes that
+  parity gap — every surface now exposes the same control set.
+
 ## [0.5.0] - 2026-06-17
 
 ### Added

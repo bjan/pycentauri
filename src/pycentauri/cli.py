@@ -323,6 +323,119 @@ def cmd_print_stop(host: HostOpt = None, enable_control: ControlOpt = False) -> 
     _run(run())
 
 
+@app.command("speed")
+def cmd_speed(
+    mode: Annotated[
+        str,
+        typer.Argument(
+            help="Speed mode: silent | balanced | sport | ludicrous "
+            "(or the integer 50 | 100 | 130 | 160).",
+        ),
+    ],
+    host: HostOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
+    """Set the print-speed mode. Only effective while a print is running."""
+    if not enable_control:
+        _echo_err("Refusing to send a write action without --enable-control.")
+        raise typer.Exit(code=2)
+
+    parsed: str | int = int(mode) if mode.lstrip("-").isdigit() else mode
+
+    async def run() -> None:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+            try:
+                await printer.set_print_speed(parsed)
+            except ValueError as err:
+                _echo_err(str(err))
+                raise typer.Exit(code=2) from err
+        typer.echo(f"speed mode set: {mode}")
+
+    _run(run())
+
+
+@app.command("fan")
+def cmd_fan(
+    model: Annotated[
+        int | None,
+        typer.Option("--model", help="Model (part-cooling) fan 0..100%."),
+    ] = None,
+    auxiliary: Annotated[
+        int | None,
+        typer.Option("--aux", "--auxiliary", help="Auxiliary fan 0..100%."),
+    ] = None,
+    chamber: Annotated[
+        int | None,
+        typer.Option("--chamber", help="Chamber/box fan 0..100%."),
+    ] = None,
+    host: HostOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
+    """Set fan speeds. Pass any subset; omitted fans are left untouched."""
+    if not enable_control:
+        _echo_err("Refusing to send a write action without --enable-control.")
+        raise typer.Exit(code=2)
+    if model is None and auxiliary is None and chamber is None:
+        _echo_err("Specify at least one of --model, --aux, --chamber.")
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+            try:
+                await printer.set_fan_speed(model=model, auxiliary=auxiliary, chamber=chamber)
+            except ValueError as err:
+                _echo_err(str(err))
+                raise typer.Exit(code=2) from err
+        parts = [
+            f"{k}={v}%"
+            for k, v in (("model", model), ("aux", auxiliary), ("chamber", chamber))
+            if v is not None
+        ]
+        typer.echo("fans set: " + ", ".join(parts))
+
+    _run(run())
+
+
+@app.command("temp")
+def cmd_temp(
+    nozzle: Annotated[
+        float | None, typer.Option("--nozzle", help="Nozzle target °C (0 = off).")
+    ] = None,
+    bed: Annotated[float | None, typer.Option("--bed", help="Bed target °C (0 = off).")] = None,
+    chamber: Annotated[
+        float | None, typer.Option("--chamber", help="Chamber target °C (0 = off).")
+    ] = None,
+    host: HostOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
+    """Set heater target temperatures. Pass any subset."""
+    if not enable_control:
+        _echo_err("Refusing to send a write action without --enable-control.")
+        raise typer.Exit(code=2)
+    if nozzle is None and bed is None and chamber is None:
+        _echo_err("Specify at least one of --nozzle, --bed, --chamber.")
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        h, mid = await _resolve_target(host)
+        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+            try:
+                await printer.set_temperatures(nozzle=nozzle, bed=bed, chamber=chamber)
+            except ValueError as err:
+                _echo_err(str(err))
+                raise typer.Exit(code=2) from err
+        parts = [
+            f"{k}={v}°C"
+            for k, v in (("nozzle", nozzle), ("bed", bed), ("chamber", chamber))
+            if v is not None
+        ]
+        typer.echo("targets set: " + ", ".join(parts))
+
+    _run(run())
+
+
 @app.command("server")
 def cmd_server(
     host: HostOpt = None,

@@ -61,7 +61,16 @@ centauri print start cube.gcode --host 192.168.1.209 --enable-control
 centauri print pause            --host 192.168.1.209 --enable-control
 centauri print resume           --host 192.168.1.209 --enable-control
 centauri print stop             --host 192.168.1.209 --enable-control
+
+# Live adjust — speed mode, fans, heaters (only effective mid-print for speed)
+centauri speed sport --host 192.168.1.209 --enable-control
+centauri fan  --model 100 --aux 60 --chamber 30 --host 192.168.1.209 --enable-control
+centauri temp --nozzle 215 --bed 60            --host 192.168.1.209 --enable-control
 ```
+
+The four speed modes (`silent`, `balanced`, `sport`, `ludicrous`) map to
+the firmware's only-accepted `PrintSpeedPct` values (50, 100, 130, 160) —
+arbitrary intermediate percentages are silently dropped by the firmware.
 
 The host can also come from the `PYCENTAURI_HOST` environment variable.
 If neither is set, every command auto-discovers via a 2.5 s UDP broadcast
@@ -88,8 +97,11 @@ async def main():
 asyncio.run(main())
 ```
 
-Control actions (`start_print`, `pause`, `resume`, `stop`) require
-`Printer.connect(..., enable_control=True)`.
+Control actions (`start_print`, `pause`, `resume`, `stop`,
+`set_print_speed`, `set_fan_speed`, `set_temperatures`) require
+`Printer.connect(..., enable_control=True)`. The mode-to-value map for
+print speed is also exposed as `Printer.PRINT_SPEED_MODES` for callers
+that want to render their own picker.
 
 ## Quick start — HTTP server
 
@@ -118,6 +130,13 @@ centauri server --host 192.168.1.209 --bind 0.0.0.0 --port 8787 \
 | `GET` | `/docs` / `/redoc` | Auto-generated OpenAPI docs |
 | `POST` | `/print/start` | Body: `{"filename": "cube.gcode"}`. Requires `--enable-control`. |
 | `POST` | `/print/{pause,resume,stop}` | Requires `--enable-control`. |
+| `POST` | `/print/speed` | Body: `{"mode": "silent\|balanced\|sport\|ludicrous"}` (or `50\|100\|130\|160`). |
+| `POST` | `/print/fan` | Body: `{"model": 50, "auxiliary": 30, "chamber": 0}` (any subset; 0..100). |
+| `POST` | `/print/temperature` | Body: `{"nozzle": 215, "bed": 60, "chamber": 0}` (any subset; °C). |
+
+The web UI's **ADJUST** panel exposes all three of the above as a
+4-button speed-mode selector and per-fan/heater rows with auto-hydration
+from live status.
 
 The server holds a single long-lived WebSocket to the printer and reuses
 it for every request — no per-request reconnect, and it won't bump into
@@ -178,6 +197,9 @@ the host is pinned at spawn time. Tools exposed:
 | `pause_print` | only with `--enable-control` | Pauses the current print |
 | `resume_print` | only with `--enable-control` | Resumes a paused print |
 | `stop_print` | only with `--enable-control` | Stops the current print |
+| `set_print_speed` | only with `--enable-control` | Sets speed mode (`silent`/`balanced`/`sport`/`ludicrous`) — only takes effect mid-print |
+| `set_fan_speed` | only with `--enable-control` | Sets any subset of model/aux/chamber fan speeds (0..100%) |
+| `set_temperatures` | only with `--enable-control` | Sets any subset of nozzle/bed/chamber heater targets (°C, 0 = off) |
 
 Control tools aren't just gated — they're not *registered* without the
 flag, so an LLM that wasn't given the `--enable-control` launch can't see

@@ -196,6 +196,53 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
             result = await printer.stop()
         return {"ok": True, "response": result.inner}
 
+    @mcp.tool()
+    async def set_print_speed(mode: str | int) -> dict[str, Any]:
+        """Set the print-speed mode. Only effective while a print is running.
+
+        ``mode`` is one of ``"silent"``, ``"balanced"``, ``"sport"``,
+        ``"ludicrous"``, or the corresponding ``PrintSpeedPct`` value
+        (``50``, ``100``, ``130``, ``160``). Arbitrary intermediate
+        values are rejected by the firmware.
+        """
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+            result = await printer.set_print_speed(mode)
+        return {"ok": True, "response": result.inner}
+
+    @mcp.tool()
+    async def set_fan_speed(
+        model: int | None = None,
+        auxiliary: int | None = None,
+        chamber: int | None = None,
+    ) -> dict[str, Any]:
+        """Set fan speeds (0..100% each). Pass any subset; omitted fans are untouched.
+
+        ``chamber`` is the chamber/box fan. At least one of the three must
+        be provided.
+        """
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+            result = await printer.set_fan_speed(model=model, auxiliary=auxiliary, chamber=chamber)
+        return {"ok": True, "response": result.inner}
+
+    @mcp.tool()
+    async def set_temperatures(
+        nozzle: float | None = None,
+        bed: float | None = None,
+        chamber: float | None = None,
+    ) -> dict[str, Any]:
+        """Set heater target temperatures in °C. Pass any subset.
+
+        ``0`` turns the corresponding heater off. Safety caps applied:
+        nozzle 0..300, bed 0..110, chamber 0..60. Setting all heaters to
+        ``0`` mid-print effectively kills the print.
+        """
+        host, mid = await _resolve_target()
+        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+            result = await printer.set_temperatures(nozzle=nozzle, bed=bed, chamber=chamber)
+        return {"ok": True, "response": result.inner}
+
     return mcp
 
 
