@@ -422,3 +422,201 @@ If 1–4 all pass but commands time out: stale connection slot exhaustion
 (the gentler failure mode). Wait a few minutes for the firmware's TCP
 TIME_WAIT to clean up; if the SDCP server is still wedged after ~5
 minutes, power-cycling is the fastest reset.
+
+---
+
+# Centauri Carbon 2 (CC2) protocol notes
+
+The CC2 uses an entirely different transport and command set from the
+CC1. These are field notes from probing firmware **01.03.02.51** on
+2026-06-30 and 2026-07-03, cross-referenced against the `elegoo-link`
+SDK's `elegoo_fdm_cc2_*` adapter source.
+
+## Network surface
+
+| Port | Service | Notes |
+|---|---|---|
+| 80 | HTTP (Angular SPA + REST) | Same concept as CC1's SPA; also serves `/system/info` for serial number bootstrap |
+| 1883 | **MQTT 3.1.1** | Primary control and telemetry transport. Replaces CC1's WebSocket SDCP. |
+| 22 | SSH (OpenSSH) | Open by default on stock firmware (unlike CC1, which needs OpenCentauri) |
+| 3030 | — | **Not present** — no SDCP/WS at all |
+| 3031 | — | **Not present** — no MJPEG at all (camera access TBD) |
+
+## Authentication
+
+MQTT broker on the printer requires username + password:
+
+| Field | Value |
+|---|---|
+| Username | `elegoo` (literal, hardcoded in SDK) |
+| Password | The printer's access code / API key (shown on printer screen, e.g. `ry2CnO`) |
+
+The HTTP surface uses the same access code via `X-Token` header or
+query parameter: `GET /system/info?X-Token=<code>`.
+
+## MQTT topic structure
+
+All topics are rooted under `elegoo/<serial_number>/`. The serial
+number (SN) is obtained from `GET /system/info` (HTTP, authenticated)
+or from the method 1001 response.
+
+| Topic pattern | Direction | Purpose |
+|---|---|---|
+| `elegoo/<sn>/api_register` | client → printer | Registration handshake (required before status pushes) |
+| `elegoo/<sn>/<request_id>/register_response` | printer → client | Registration acknowledgement |
+| `elegoo/<sn>/<client_id>/api_request` | client → printer | All commands (JSON-RPC style) |
+| `elegoo/<sn>/<client_id>/api_response` | printer → client | Command responses (matched by `id`) |
+| `elegoo/<sn>/api_status` | printer → broadcast | Unsolicited status pushes (method 6000/6008) |
+
+Subscribing to `elegoo/<sn>/#` captures everything including other
+clients' traffic (the MQTT broker doesn't isolate clients from each
+other). In practice this means you can observe OrcaSlicer's keepalive
+PINGs and any other connected software.
+
+## Connection dance
+
+1. Connect to `tcp://<host>:1883` with `username="elegoo"`,
+   `password=<access_code>`, `client_id="1_PC_<random_int>"`.
+2. Subscribe to `elegoo/<sn>/#`.
+3. Publish registration: `elegoo/<sn>/api_register` with body
+   `{"client_id": "<client_id>", "request_id": "<client_id>_req"}`.
+4. Receive `register_response` with `{"error": "ok"}`.
+5. You are now a registered client. The printer will include your
+   `client_id` in broadcast push routing and respond to your requests.
+
+## Request envelope
+
+JSON-RPC-style, published to `elegoo/<sn>/<client_id>/api_request`:
+
+```json
+{"id": <int>, "method": <int>, "params": {<method-specific>}}
+```
+
+Responses arrive on `elegoo/<sn>/<client_id>/api_response` with the
+same `id` echoed back. Broadcast status pushes use method 6000/6008
+with auto-incrementing `id` values and arrive on both the
+`api_response` topic and the `api_status` topic.
+
+PING/PONG keepalive is separate from JSON-RPC: publish
+`{"type": "PING"}`, receive `{"type": "PONG"}`. The SDK sends these
+every ~30 seconds.
+
+## Method codes (CC2 firmware)
+
+### Confirmed-working (probed 2026-07-03, firmware 01.03.02.51)
+
+| Method | Name | Params | Returns |
+|---|---|---|---|
+| 1001 | `GET_PRINTER_ATTRIBUTES` | `{}` | hostname, model, SN, firmware versions, IP |
+| 1002 | `GET_PRINTER_STATUS` | `{}` | Rich status: temps, fans (5 channels), gcode_move (incl. `speed` + `speed_mode`), position, print progress, layer, durations |
+| 1020 | `START_PRINT` | `{filename, storage_media, ...}` | (not probed — SDK has it enabled) |
+| 1021 | `PAUSE_PRINT` | `{}` | (not probed — SDK has it enabled) |
+| 1022 | `STOP_PRINT` | `{}` | (not probed — SDK has it enabled) |
+| 1023 | `RESUME_PRINT` | `{}` | `error_code: 1010` when idle (expected), confirmed responsive |
+| 1026 | `HOME_AXES` | `{}` | `error_code: 0`, physically homes the axes, triggers 6000 push |
+| 1027 | `MOVE_AXES` | `{"axis":"Z","step":<mm>}` | `error_code: 1003` (may require homing first) |
+| 1028 | `SET_TEMPERATURE` | `{"extruder": <°C>, "heater_bed": <°C>}` | `error_code: 0` |
+| 1029 | `SET_LIGHT` | `{"status": <0\|1>}` | `error_code: 0` |
+| 1030 | `SET_FAN_SPEED` | `{"fan": <0-255>, "aux_fan": <0-255>, "box_fan": <0-255>}` | `error_code: 0`, fan physically responds |
+| 1031 | `SET_PRINT_SPEED` | `{"mode": <0-3>}` | `error_code: 1010` when idle (expected — only effective mid-print) |
+| 1036 | `PRINT_TASK_LIST` | `{}` | `error_code: 0`, array of `history_task_list` with UUIDs, filenames, timestamps, status |
+| 1043 | `UPDATE_PRINTER_NAME` | (not probed — SDK has it enabled) | — |
+| 2005 | `GET_CANVAS_STATUS` | (not probed — SDK has it enabled) | — |
+
+### Not responding (probed 2026-07-03)
+
+| Method | Name | Notes |
+|---|---|---|
+| 1042 | `VIDEO_STREAM` | No response (timeout). Camera may use a different path. |
+| 1044 | `GET_FILE_LIST` | No response (timeout). May need different params or firmware version. |
+
+### Error codes observed
+
+| Code | Meaning (inferred) |
+|---|---|
+| 0 | Success |
+| 1003 | Precondition not met (e.g. axes not homed for MOVE_AXES) |
+| 1010 | Invalid state for operation (e.g. RESUME when not printing, SET_SPEED when idle) |
+
+## Status payload (method 1002 response)
+
+Significantly richer than CC1's SDCP status push:
+
+```json
+{
+  "gcode_move": {
+    "speed": 3000,          // ← Live head speed in mm/min (CC1 lacks this!)
+    "speed_mode": 1,        // 0=silent, 1=balanced, 2=sport, 3=ludicrous
+    "x": 52.5, "y": 264.0, "z": 80.0,
+    "extruder": 0.0
+  },
+  "extruder": {
+    "temperature": 27, "target": 0,
+    "filament_detect_enable": 1, "filament_detected": 0
+  },
+  "heater_bed": { "temperature": 24, "target": 0 },
+  "fans": {
+    "fan":            { "speed": 0.0 },   // model/part-cooling
+    "aux_fan":        { "speed": 0.0 },
+    "box_fan":        { "speed": 0.0 },   // chamber
+    "controller_fan": { "speed": 0.0 },   // NEW: board cooling
+    "heater_fan":     { "speed": 0.0 }    // NEW: hotend heat-break
+  },
+  "machine_status": {
+    "status": 1,            // 1=idle (other values TBD)
+    "sub_status": 0,
+    "sub_status_reason_code": 0,
+    "exception_status": [],
+    "progress": 0
+  },
+  "print_status": {
+    "state": "",
+    "filename": "",
+    "current_layer": 0,
+    "print_duration": 0,      // seconds elapsed
+    "remaining_time_sec": 0,  // seconds remaining (firmware estimate)
+    "total_duration": 0,
+    "uuid": "",
+    "bed_mesh_detect": true,
+    "filament_detect": false,
+    "enable": true
+  },
+  "led": { "status": 1 },
+  "tool_head": { "homed_axes": "" },
+  "ztemperature_sensor": {
+    "temperature": 22,
+    "measured_max_temperature": 0,
+    "measured_min_temperature": 0
+  },
+  "external_device": {
+    "camera": true,
+    "u_disk": true,
+    "type": "0303"
+  }
+}
+```
+
+Key differences from CC1's status payload:
+- `gcode_move.speed` — live head velocity in mm/min (CC1 lacks this
+  entirely; the screen UI reads it from internal memory, not SDCP).
+- `gcode_move.speed_mode` — integer 0–3 directly (CC1 only reports
+  `PrintSpeedPct` from which the mode must be inferred).
+- Five named fan channels instead of three.
+- `remaining_time_sec` is firmware-computed (CC1 requires
+  `TotalTicks - CurrentTicks` client-side).
+- `filament_detect_enable` / `filament_detected` for runout sensor.
+
+## CC1 vs CC2 at a glance
+
+| | CC1 | CC2 |
+|---|---|---|
+| Transport | WebSocket :3030 | MQTT :1883 |
+| Auth | None | `elegoo` / access_code |
+| Discovery | UDP M99999 broadcast | HTTP `/system/info` |
+| Cmd code range | 0–512 | 1001–2005+ |
+| Envelope | SDCP v3 (`Id`, `Topic`, `Data.Cmd`) | JSON-RPC (`id`, `method`, `params`) |
+| Status push | Cmd 512 subscribe → auto-push | Register → method 6000/6008 pushes |
+| Live head speed | Not exposed | `gcode_move.speed` |
+| Fan channels | 3 (model, aux, box) | 5 (+controller, +heater) |
+| SSH | OpenCentauri only | Stock |
+| Probing risk | **Crashes `app` daemon** | Graceful error_code responses |
