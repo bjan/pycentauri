@@ -270,3 +270,92 @@ def test_canvas_parse_survives_malformed_payloads() -> None:
         == 0
     )
     assert CanvasStatus.from_payload({"canvas_info": {"canvas_list": "bogus"}}).tray_count == 0
+
+
+# --- speed-mode restore across filament switches -------------------------------
+
+
+def _payload(status: int, mode: int) -> dict[str, Any]:
+    return {"PrintInfo": {"Status": status}, "_cc2": {"speed_mode": mode}}
+
+
+def _printer(enable_control: bool = False) -> Any:
+    from pycentauri.cc2 import CC2Printer
+
+    return CC2Printer("127.0.0.1", access_code="x", enable_control=enable_control)
+
+
+def test_switch_snapshots_and_flags_restore(monkeypatch: Any) -> None:
+    p = _printer(enable_control=False)
+    # Printing at sport (2)
+    p._track_speed_mode(_payload(13, 2))
+    assert p._speed_mode_during_print == 2
+    # Switch begins — snapshot taken
+    p._track_speed_mode(_payload(27, 1))
+    assert p._speed_mode_to_restore == 2
+    # Switch ends with the firmware reset to balanced; control off → no
+    # restore task, but the pending snapshot is consumed.
+    p._track_speed_mode(_payload(13, 1))
+    assert p._speed_mode_to_restore is None
+
+
+def test_no_restore_when_mode_survives_switch() -> None:
+    p = _printer()
+    p._track_speed_mode(_payload(13, 3))
+    p._track_speed_mode(_payload(27, 3))
+    assert p._speed_mode_to_restore == 3
+    # Firmware kept the mode: nothing to do, baseline continues
+    p._track_speed_mode(_payload(13, 3))
+    assert p._speed_mode_to_restore is None
+    assert p._speed_mode_during_print == 3
+
+
+def test_snapshot_not_overwritten_mid_switch() -> None:
+    p = _printer()
+    p._track_speed_mode(_payload(13, 2))
+    p._track_speed_mode(_payload(27, 1))
+    p._track_speed_mode(_payload(27, 1))  # more switch polls
+    assert p._speed_mode_to_restore == 2
+
+
+def test_idle_states_do_not_touch_tracking() -> None:
+    p = _printer()
+    p._track_speed_mode(_payload(13, 2))
+    p._track_speed_mode(_payload(0, 1))  # idle
+    p._track_speed_mode(_payload(6, 1))  # paused
+    assert p._speed_mode_during_print == 2
+    assert p._speed_mode_to_restore is None
+
+
+def test_pre_switch_reset_does_not_poison_baseline() -> None:
+    """Replicates the live trace from 2026-07-05 14:10: the firmware
+    resets speed_mode ~6 s BEFORE the head parks for the switch."""
+    p = _printer()
+    t = [0.0]
+    p._now = lambda: t[0]
+    p._track_speed_mode(_payload(13, 2))  # printing at sport (bootstrap)
+    t[0] = 120.0
+    p._track_speed_mode(_payload(13, 2))  # still sport
+    # Pre-switch reset: mode drops while status is still 13
+    t[0] = 126.0
+    p._track_speed_mode(_payload(13, 1))
+    t[0] = 129.0
+    p._track_speed_mode(_payload(13, 1))  # held only 3 s — not promoted
+    assert p._speed_mode_during_print == 2
+    # Head parks, switch state
+    t[0] = 132.0
+    p._track_speed_mode(_payload(27, 1))
+    assert p._speed_mode_to_restore == 2  # snapshot is the REAL baseline
+
+
+def test_sustained_mode_change_becomes_baseline() -> None:
+    p = _printer()
+    t = [0.0]
+    p._now = lambda: t[0]
+    p._track_speed_mode(_payload(13, 1))  # bootstrap balanced
+    t[0] = 10.0
+    p._track_speed_mode(_payload(13, 3))  # user sets ludicrous on screen
+    assert p._speed_mode_during_print == 1  # not yet promoted
+    t[0] = 26.0
+    p._track_speed_mode(_payload(13, 3))  # held 16 s → promoted
+    assert p._speed_mode_during_print == 3

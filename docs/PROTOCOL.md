@@ -655,7 +655,11 @@ Key differences from CC1's status payload:
   2026-07-05). It changes per move, so travels briefly spike it above
   print speeds. (CC1 exposes no speed field at all.)
 - `gcode_move.speed_mode` — integer 0–3 directly (CC1 only reports
-  `PrintSpeedPct` from which the mode must be inferred).
+  `PrintSpeedPct` from which the mode must be inferred). **Canvas
+  filament switches reset it to 1 (balanced) and it stays reset after
+  the switch completes** (verified 2026-07-05 by watching the
+  27→13 transition). pycentauri snapshots the pre-switch mode and
+  re-applies it via method 1031 once printing resumes.
 - Five named fan channels instead of three.
 - `remaining_time_sec` is firmware-computed (CC1 requires
   `TotalTicks - CurrentTicks` client-side).

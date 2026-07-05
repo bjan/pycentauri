@@ -357,6 +357,10 @@ reports code 27 the entire time the head is parked there mid-print.
   cooldown of a few seconds during which the broker silently drops
   responses. pycentauri's polling cadence stays under it; your scripts
   should too.
+- **Canvas filament switches reset the speed mode.** Every mid-print
+  switch silently drops the printer back to balanced. pycentauri
+  detects the switch ending and re-applies whatever mode was active
+  before it (needs `--enable-control`).
 - **Registrations expire without an app-level PING.** The printer
   forgets a registered client after several quiet minutes and silently
   stops answering that session's requests — the MQTT connection itself

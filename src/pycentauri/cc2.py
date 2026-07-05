@@ -17,6 +17,7 @@ import contextlib
 import json
 import logging
 import random
+import time
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -39,6 +40,11 @@ log = logging.getLogger(__name__)
 MQTT_PORT = 1883
 CC2_USERNAME = "elegoo"
 PING_INTERVAL_S = 30.0
+# A speed mode must hold this long before it becomes the restore baseline —
+# the firmware resets speed_mode several seconds BEFORE the head parks for a
+# filament switch (observed 2026-07-05: reset at T-6s), and without the hold
+# that transient poisons the baseline.
+BASELINE_HOLD_S = 15.0
 # Lifecycle commands (start/pause/stop/resume) are answered only after the
 # firmware finishes the mechanical sequence — a resume reheats and unparks
 # before responding, easily exceeding the default 15 s request timeout
@@ -264,6 +270,15 @@ class CC2Printer(Printer):
         self._last_full_result: dict[str, Any] | None = None
         self._connect_error: str | None = None
         self._ping_task: asyncio.Task[None] | None = None
+        # Speed-mode restore across Canvas filament switches: the firmware
+        # resets speed_mode to balanced (1) on every mid-print switch
+        # (verified 2026-07-05 — mode stays 1 after the switch completes).
+        self._speed_mode_during_print: int | None = None
+        self._speed_mode_to_restore: int | None = None
+        self._restore_task: asyncio.Task[None] | None = None
+        self._mode_candidate: int | None = None
+        self._mode_candidate_since: float = 0.0
+        self._now = time.monotonic  # overridable for tests
 
     @classmethod
     async def connect(
@@ -352,6 +367,7 @@ class CC2Printer(Printer):
         result = await self._cc2_request(1002, {}, timeout=timeout)
         self._last_full_result = result
         payload = _cc2_status_to_cc1(result)
+        self._track_speed_mode(payload)
         st = Status.from_payload(payload)
         self._latest_status = st
         self._latest_status_event.set()
@@ -447,6 +463,12 @@ class CC2Printer(Printer):
                     f"{sorted(self.PRINT_SPEED_MODES.values())}"
                 )
         result = await self._cc2_request(1031, {"mode": value})
+        # The user's explicit choice supersedes any pending post-switch
+        # restore and becomes the new baseline.
+        self._speed_mode_during_print = value
+        self._mode_candidate = None
+        if self._speed_mode_to_restore is not None:
+            self._speed_mode_to_restore = value
         return self._wrap_result(1031, result)
 
     async def set_fan_speed(
@@ -512,10 +534,11 @@ class CC2Printer(Printer):
         if self._closed:
             return
         self._closed = True
-        if self._ping_task is not None and not self._ping_task.done():
-            self._ping_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._ping_task
+        for task in (self._ping_task, self._restore_task):
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
         if self._mqtt is not None:
             self._mqtt.disconnect()  # flush DISCONNECT before stopping the loop
             self._mqtt.loop_stop()
@@ -623,6 +646,7 @@ class CC2Printer(Printer):
                 return
             _deep_merge(self._last_full_result, result)
             payload = _cc2_status_to_cc1(self._last_full_result)
+            self._track_speed_mode(payload)
             st = Status.from_payload(payload)
             self._latest_status = st
             self._latest_status_event.set()
@@ -631,6 +655,75 @@ class CC2Printer(Printer):
                     q.put_nowait(st)
         except Exception:
             log.exception("failed to handle CC2 status push")
+
+    def _track_speed_mode(self, payload: dict[str, Any]) -> None:
+        """Restore the speed mode after a Canvas filament switch.
+
+        The firmware resets ``speed_mode`` to balanced on every mid-print
+        filament switch (verified 2026-07-05). We snapshot the mode in
+        effect when a switch starts (print_status 27) and re-apply it once
+        printing resumes, so the user's selection — made from any surface,
+        including the touchscreen — survives the switch. Requires
+        ``enable_control``; read-only sessions just log the reset.
+        """
+        print_status = payload.get("PrintInfo", {}).get("Status")
+        speed_mode = payload.get("_cc2", {}).get("speed_mode")
+        if not isinstance(speed_mode, int) or print_status is None:
+            return
+        if print_status == 27:
+            if self._speed_mode_to_restore is None and self._speed_mode_during_print is not None:
+                self._speed_mode_to_restore = self._speed_mode_during_print
+            return
+        if print_status != 13:
+            return
+        want = self._speed_mode_to_restore
+        if want is not None:
+            self._speed_mode_to_restore = None
+            if want != speed_mode:
+                if self.enable_control:
+                    self._restore_task = asyncio.create_task(
+                        self._restore_speed_mode(want),
+                        name=f"pycentauri-cc2-speedrestore-{self.host}",
+                    )
+                else:
+                    log.warning(
+                        "filament switch reset speed_mode %d -> %d; "
+                        "enable_control is off so it will not be restored",
+                        want,
+                        speed_mode,
+                    )
+                return
+        # Track the running mode, but not while a restore is in flight —
+        # the firmware still reports the reset value for a poll or two.
+        if self._restore_task is not None and not self._restore_task.done():
+            return
+        if self._speed_mode_during_print is None:
+            # Bootstrap: first observation is the baseline.
+            self._speed_mode_during_print = speed_mode
+            return
+        if speed_mode == self._speed_mode_during_print:
+            self._mode_candidate = None
+            return
+        # Debounce: a changed mode must hold BASELINE_HOLD_S before it
+        # becomes the restore baseline, so the firmware's pre-switch reset
+        # (which fires seconds before the head parks) never gets adopted.
+        now = self._now()
+        if speed_mode != self._mode_candidate:
+            self._mode_candidate = speed_mode
+            self._mode_candidate_since = now
+        elif now - self._mode_candidate_since >= BASELINE_HOLD_S:
+            self._speed_mode_during_print = speed_mode
+            self._mode_candidate = None
+
+    async def _restore_speed_mode(self, mode: int) -> None:
+        await asyncio.sleep(2.0)  # let the firmware settle after the switch
+        try:
+            await self._cc2_request(1031, {"mode": mode})
+            log.info("restored speed_mode %d after filament switch", mode)
+        except Exception:
+            log.warning(
+                "could not restore speed_mode %d after filament switch", mode, exc_info=True
+            )
 
     def _publish_register(self) -> None:
         topic = f"elegoo/{self._serial_number}/api_register"

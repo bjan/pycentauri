@@ -6,6 +6,25 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-07-05
+
+### Fixed
+- **CC2: the user's speed mode now survives Canvas filament switches.**
+  The firmware resets `speed_mode` to balanced on every mid-print
+  switch and leaves it there (verified 2026-07-05: mode stayed reset
+  after the switch completed). `CC2Printer` now snapshots the mode in
+  effect when a switch begins and re-applies it once printing resumes —
+  regardless of whether the mode was set via pycentauri or the
+  touchscreen. Requires `enable_control`; read-only sessions log the
+  reset instead. The restore baseline is debounced (a mode must hold
+  15 s to count) because the firmware fires its reset several seconds
+  *before* the head parks — without the debounce, that transient
+  poisoned the snapshot. Verified across two hands-free switch cycles
+  with journal-logged restores ~3 s after each resume.
+- `centauri server` now surfaces pycentauri's own log lines (speed-mode
+  restores, reconnects) in its output — previously only uvicorn's
+  loggers were configured and library INFO logs were invisible.
+
 ## [0.6.0] - 2026-07-05
 
 ### Added

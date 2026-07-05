@@ -747,6 +747,11 @@ def run(
     """
     import uvicorn
 
+    # Surface pycentauri's own log lines (reconnects, speed-mode restores)
+    # in the journal — uvicorn only configures its own loggers, and the
+    # root logger's lastResort handler hides INFO.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s: %(message)s")
+
     app = create_app(
         host,
         enable_control=enable_control,
