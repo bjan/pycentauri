@@ -656,14 +656,21 @@ Key differences from CC1's status payload:
   print speeds. (CC1 exposes no speed field at all.)
 - `gcode_move.speed_mode` — integer 0–3 directly (CC1 only reports
   `PrintSpeedPct` from which the mode must be inferred). **The firmware
-  resets it to 1 (balanced) around every Canvas filament switch — the
-  reset fires several seconds BEFORE the head parks — and sometimes
-  mid-print with no switch at all** (all observed 2026-07-05; a
-  snapshot-per-switch restore worked 8 times in a row and was then
-  defeated by an out-of-window reset). It only ever resets TO
-  balanced, never to another mode. pycentauri therefore pins the
-  user's selection and re-applies it via method 1031 whenever the
-  reported mode disagrees for ~12 s during printing.
+  resets it to 1 (balanced) as part of every Canvas filament-switch
+  sequence** (observed 2026-07-05). Two timing details matter: the
+  reset fires several seconds BEFORE the head parks at the chute, while
+  `machine_status` still reports printing — so watching the status code
+  alone, an early reset looks like a standalone mid-print event when it
+  is really the leading edge of a switch. And the reset's lead time
+  varies, which is what defeated a snapshot-on-switch restore (it
+  worked 8 times, then a reset that led its switch by more than the
+  debounce window poisoned the baseline). The firmware only ever resets
+  TO balanced, never to another mode. pycentauri therefore ignores
+  *why* the mode drifts: it pins the user's selection and re-applies it
+  via method 1031 whenever the reported mode disagrees for ~12 s during
+  printing. A human's touchscreen tap for balanced is byte-identical on
+  the wire to a firmware reset, so it cannot be told apart while a pin
+  is active — callers release the pin with a `mode: "auto"` request.
 - Five named fan channels instead of three.
 - `remaining_time_sec` is firmware-computed (CC1 requires
   `TotalTicks - CurrentTicks` client-side).

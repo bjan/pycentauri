@@ -41,14 +41,16 @@ MQTT_PORT = 1883
 CC2_USERNAME = "elegoo"
 PING_INTERVAL_S = 30.0
 # Speed-mode pinning. The firmware only ever resets speed_mode TO balanced
-# (1) — before filament switches (observed at T-6..10s before the head
-# parks), sometimes again after a restore, and occasionally mid-print with
-# no switch at all (observed 2026-07-05 ~15:00). A snapshot-per-switch
-# design lost that arms race, so instead the mode a user selects is PINNED
-# and enforced: a disagreement lasting ENFORCE_AFTER_S while printing gets
-# re-applied, at most once per ENFORCE_MIN_INTERVAL_S. A sustained
-# non-balanced mode from the touchscreen (held PIN_LEARN_S) adopts the pin,
-# since the firmware never resets to a non-balanced mode.
+# (1), as part of every Canvas filament switch — the reset fires several
+# seconds before the head parks (T-6..10s observed 2026-07-05) while the
+# status still reads "printing", and its lead time varies. A snapshot-on-
+# switch design lost that arms race (a reset leading its switch by more than
+# the debounce window poisoned the baseline), so instead the mode a user
+# selects is PINNED and enforced regardless of why it drifted: a
+# disagreement lasting ENFORCE_AFTER_S while printing gets re-applied, at
+# most once per ENFORCE_MIN_INTERVAL_S. A sustained non-balanced mode from
+# the touchscreen (held PIN_LEARN_S) adopts the pin, since the firmware
+# never resets to a non-balanced mode.
 # PIN_LEARN_S must be SHORTER than ENFORCE_AFTER_S: a touchscreen change to
 # a non-balanced mode has to be adopted as the new pin before enforcement
 # would revert it, or screen users could never override a pinned mode.

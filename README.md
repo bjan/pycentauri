@@ -118,12 +118,15 @@ Speed changes only take effect while a print is actively running.
 
 #### CC2 speed pinning (the firmware fights you, so pycentauri fights back)
 
-The CC2 firmware **resets the speed mode back to balanced on its own**,
-repeatedly, during a print: on every Canvas filament switch, and on the
-brief nozzle-wipe / purge operations at the chute that happen every
-couple of minutes. Set sport once and the printer quietly drops you to
-balanced a minute later. This is firmware behavior; it happens whether
-you set the speed from pycentauri or from the printer's own touchscreen.
+The CC2 firmware **resets the speed mode back to balanced on every
+Canvas filament switch.** On a multi-color print that switch happens
+every couple of minutes, so set sport once and the printer quietly
+drops you to balanced at the next color change. (The reset actually
+fires a few seconds *before* the head parks at the chute, while the
+status still reads "printing" — so if you only watch the status code it
+can look like a random mid-print reset, but it's the leading edge of
+the switch.) This is firmware behavior; it happens whether you set the
+speed from pycentauri or from the printer's own touchscreen.
 
 pycentauri works around it with **pin-and-enforce** (CC2 only, requires
 `--enable-control`):
@@ -401,9 +404,9 @@ reports code 27 the entire time the head is parked there mid-print.
   cooldown of a few seconds during which the broker silently drops
   responses. pycentauri's polling cadence stays under it; your scripts
   should too.
-- **The firmware keeps resetting the speed mode to balanced** during a
-  print (filament switches, nozzle wipes, purges). pycentauri pins your
-  chosen mode and re-applies it automatically — see
+- **The firmware resets the speed mode to balanced on every Canvas
+  filament switch.** pycentauri pins your chosen mode and re-applies it
+  automatically — see
   [CC2 speed pinning](#cc2-speed-pinning-the-firmware-fights-you-so-pycentauri-fights-back)
   above for how it works and the one case (`balanced` from the
   touchscreen) that needs the Auto button.
