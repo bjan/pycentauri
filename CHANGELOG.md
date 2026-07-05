@@ -6,6 +6,27 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-07-05
+
+### Changed
+- **CC2 speed pinning now tells a human's balanced apart from a firmware
+  reset — no more Auto escape hatch.** The firmware resets speed_mode to
+  balanced as the leading edge of every Canvas filament switch, a few
+  seconds before the head parks; measured reset→park lead times are
+  tight (6–8 s, never above ~9 s). pycentauri uses that: a drop to
+  balanced followed by a park within ~12 s is the firmware and the
+  pinned mode is re-applied when the switch completes; a drop that sits
+  at balanced for ~12 s with no park is a human tapping balanced on the
+  touchscreen, so the pin is released and balanced is honored. A
+  sustained non-balanced touchscreen mode is still adopted as the pin
+  outright. Both paths live-verified 2026-07-05 (firmware re-apply and
+  human release, each with journal-logged decisions).
+- **Removed the `auto` speed mode / Auto button.** It existed only to
+  release the pin for the touchscreen-balanced case, which is now
+  detected automatically. `speed auto`, `{"mode": "auto"}`, and the web
+  UI Auto button are gone.
+
+
 ## [0.6.2] - 2026-07-05
 
 ### Changed

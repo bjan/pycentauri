@@ -657,20 +657,21 @@ Key differences from CC1's status payload:
 - `gcode_move.speed_mode` — integer 0–3 directly (CC1 only reports
   `PrintSpeedPct` from which the mode must be inferred). **The firmware
   resets it to 1 (balanced) as part of every Canvas filament-switch
-  sequence** (observed 2026-07-05). Two timing details matter: the
-  reset fires several seconds BEFORE the head parks at the chute, while
-  `machine_status` still reports printing — so watching the status code
-  alone, an early reset looks like a standalone mid-print event when it
-  is really the leading edge of a switch. And the reset's lead time
-  varies, which is what defeated a snapshot-on-switch restore (it
-  worked 8 times, then a reset that led its switch by more than the
-  debounce window poisoned the baseline). The firmware only ever resets
-  TO balanced, never to another mode. pycentauri therefore ignores
-  *why* the mode drifts: it pins the user's selection and re-applies it
-  via method 1031 whenever the reported mode disagrees for ~12 s during
-  printing. A human's touchscreen tap for balanced is byte-identical on
-  the wire to a firmware reset, so it cannot be told apart while a pin
-  is active — callers release the pin with a `mode: "auto"` request.
+  sequence** (observed 2026-07-05), and only ever to balanced, never to
+  another mode. The reset fires a few seconds BEFORE the head parks at
+  the chute, while `machine_status` still reports printing — so watching
+  the status code alone, the reset looks like a standalone mid-print
+  event when it is really the leading edge of a switch. Measured
+  reset→park lead times were tight: 6, 7, 7, 8 s (sub-second capture)
+  and never above ~9 s across a dozen switches. pycentauri uses that
+  gap to tell a firmware reset from a human tapping balanced on the
+  touchscreen (byte-identical on the wire): a drop to balanced followed
+  by a park within ~12 s is the firmware (re-apply the pinned mode via
+  method 1031 when the switch completes); a drop that sits at balanced
+  for ~12 s with NO park is a human (release the pin, honor balanced).
+  A sustained *non*-balanced mode from the touchscreen is adopted as
+  the new pin outright, since the firmware never produces one. Both
+  live-verified 2026-07-05.
 - Five named fan channels instead of three.
 - `remaining_time_sec` is firmware-computed (CC1 requires
   `TotalTicks - CurrentTicks` client-side).

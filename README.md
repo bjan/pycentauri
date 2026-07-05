@@ -121,44 +121,33 @@ Speed changes only take effect while a print is actively running.
 The CC2 firmware **resets the speed mode back to balanced on every
 Canvas filament switch.** On a multi-color print that switch happens
 every couple of minutes, so set sport once and the printer quietly
-drops you to balanced at the next color change. (The reset actually
-fires a few seconds *before* the head parks at the chute, while the
-status still reads "printing" — so if you only watch the status code it
-can look like a random mid-print reset, but it's the leading edge of
-the switch.) This is firmware behavior; it happens whether you set the
-speed from pycentauri or from the printer's own touchscreen.
+drops you to balanced at the next color change. This is firmware
+behavior; it happens whether you set the speed from pycentauri or from
+the printer's own touchscreen.
 
 pycentauri works around it with **pin-and-enforce** (CC2 only, requires
 `--enable-control`):
 
 - **Whatever mode you select gets pinned.** Set it via pycentauri (pins
-  immediately) or on the touchscreen (pinned after it holds a few
-  seconds — the firmware never *resets* to a non-balanced mode, so a
-  sustained sport/ludicrous/silent must be a human).
-- **The pin is enforced.** Any time the printer drifts off your pinned
-  mode for more than ~12 seconds while printing, pycentauri re-applies
-  it. Your choice wins, no matter how often the firmware resets.
+  immediately) or on the touchscreen (pinned after it holds ~8 seconds —
+  the firmware never *resets* to a non-balanced mode, so a sustained
+  sport/ludicrous/silent must be a human).
+- **A firmware reset is re-applied.** The reset fires a few seconds
+  *before* the head parks at the chute, so when the speed drops to
+  balanced pycentauri waits to see what follows: a filament switch
+  (the head parking) within ~12 seconds means it was the firmware, and
+  the pinned mode is re-applied as soon as the switch completes.
+- **A human's balanced is honored.** If the speed drops to balanced and
+  *no* switch follows within ~12 seconds, that was you tapping balanced
+  on the touchscreen — the pin is released and balanced stays. (On the
+  wire a human tap is byte-identical to a firmware reset; the presence
+  or absence of the following switch is what tells them apart. Measured
+  reset→park lead times cluster at 6–8 s, well inside the window.)
 - **The pin clears when the print ends.**
 
-There is exactly one case pin-and-enforce cannot handle automatically:
-**selecting `balanced` on the touchscreen while a faster mode is
-pinned.** On the wire, a human tapping "balanced" is byte-for-byte
-identical to the firmware's own reset-to-balanced (verified by packet
-capture), so pycentauri can't tell them apart and will treat your tap
-as one more reset to correct. For that case, use **Auto**:
-
-```sh
-centauri speed auto --host <cc2-ip> --access-code <code> --enable-control
-```
-
-or the **Auto** button in the web UI, or `POST /print/speed` with
-`{"mode": "auto"}`. Auto **releases the pin** and hands speed control
-back to the printer and its touchscreen — it sends no speed command
-itself, it just stops enforcing. Pick any real mode again and the pin
-comes back.
-
-Mental model: **selecting a mode means "hold it here no matter what."
-Auto means "let go, I'll drive."**
+So both paths just work: set any speed from either the app or the
+printer and it sticks across filament switches, and you can always
+drop back to balanced from the touchscreen whenever you want.
 
 The CC1 has none of this — its speed mode stays where you put it, so
 `set_print_speed` is a plain one-shot there.
@@ -406,10 +395,10 @@ reports code 27 the entire time the head is parked there mid-print.
   should too.
 - **The firmware resets the speed mode to balanced on every Canvas
   filament switch.** pycentauri pins your chosen mode and re-applies it
-  automatically — see
+  automatically, while still honoring a deliberate balanced from the
+  touchscreen — see
   [CC2 speed pinning](#cc2-speed-pinning-the-firmware-fights-you-so-pycentauri-fights-back)
-  above for how it works and the one case (`balanced` from the
-  touchscreen) that needs the Auto button.
+  above for how it tells the two apart.
 - **Registrations expire without an app-level PING.** The printer
   forgets a registered client after several quiet minutes and silently
   stops answering that session's requests — the MQTT connection itself

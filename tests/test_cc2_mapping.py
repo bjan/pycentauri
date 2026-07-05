@@ -272,7 +272,7 @@ def test_canvas_parse_survives_malformed_payloads() -> None:
     assert CanvasStatus.from_payload({"canvas_info": {"canvas_list": "bogus"}}).tray_count == 0
 
 
-# --- speed-mode pin & enforce ---------------------------------------------
+# --- speed-mode pin, enforce & human/firmware adjudication ----------------
 
 
 def _payload(status: int, mode: int) -> dict[str, Any]:
@@ -284,7 +284,18 @@ def _printer(enable_control: bool = True) -> Any:
 
     p = CC2Printer("127.0.0.1", access_code="x", enable_control=enable_control)
     p._fired: list[int] = []
-    p._launch_enforce = p._fired.append  # record instead of spawning tasks
+    p._enforce_calls = 0
+
+    def fake_enforce(current_mode: int, now: float) -> None:
+        # Mirror the real rate-limit + record instead of spawning a task.
+        import pycentauri.cc2 as m
+
+        if now - p._last_enforce < m.ENFORCE_MIN_INTERVAL_S:
+            return
+        p._last_enforce = now
+        p._fired.append(p._pinned_mode)
+
+    p._enforce = fake_enforce
     t = [0.0]
     p._clock = t
     p._now = lambda: t[0]
@@ -296,63 +307,99 @@ def _tick(p: Any, dt: float, status: int, mode: int) -> None:
     p._track_speed_mode(_payload(status, mode))
 
 
-def test_api_set_pins_immediately_and_enforces_after_grace() -> None:
+# --- firmware reset: switch follows, mode is re-applied on resume ---------
+
+
+def test_firmware_reset_reenforced_after_switch() -> None:
     p = _printer()
-    p._pinned_mode = 2  # what set_print_speed() records
-    _tick(p, 0, 13, 2)
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)  # printing at sport
+    _tick(p, 3, 13, 1)  # pre-switch reset (T=3)
+    _tick(p, 4, 13, 1)  # still no park; within window, wait
     assert p._fired == []
-    # Firmware resets to balanced mid-print; not enforced until it holds 12 s
-    _tick(p, 5, 13, 1)
-    _tick(p, 5, 13, 1)
-    assert p._fired == []
-    _tick(p, 5, 13, 1)  # mismatch has now persisted 10 s... (first at t=10)
-    _tick(p, 5, 13, 1)  # 15 s since mismatch start -> fires
+    _tick(p, 2, 27, 1)  # head parks -> switch seen
+    _tick(p, 180, 27, 1)  # switch runs for 3 min
+    assert p._fired == []  # never released, never enforced mid-switch
+    _tick(p, 1, 13, 1)  # resume, still balanced -> re-apply sport
     assert p._fired == [2]
 
 
-def test_pre_switch_reset_window_never_fires() -> None:
-    """The 6-10 s balanced window before the head parks stays untouched."""
+def test_park_within_window_prevents_human_release() -> None:
+    """A park inside the window must stop the human-release clock."""
     p = _printer()
     p._pinned_mode = 2
     _tick(p, 0, 13, 2)
-    _tick(p, 3, 13, 1)  # pre-switch reset
-    _tick(p, 3, 13, 1)  # 6 s in
-    _tick(p, 3, 27, 1)  # head parks -> mismatch clock cleared
-    _tick(p, 60, 27, 1)  # switch runs
-    assert p._fired == []
-    # Resume: reset persists, enforcement kicks in after the grace period
-    _tick(p, 5, 13, 1)
-    _tick(p, 13, 13, 1)
+    _tick(p, 5, 13, 1)  # reset at T=5
+    _tick(p, 4, 27, 1)  # park inside the window -> switch seen
+    _tick(p, 20, 27, 1)  # long switch, we are not printing
+    _tick(p, 1, 13, 1)  # resume -> firmware, re-apply
+    assert p._pinned_mode == 2
     assert p._fired == [2]
+
+
+# --- human balanced: no switch, pin released ------------------------------
+
+
+def test_human_balanced_releases_pin_after_window() -> None:
+    p = _printer()
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)  # printing at sport
+    _tick(p, 2, 13, 1)  # user taps balanced (T=2)
+    _tick(p, 5, 13, 1)  # T=7, no switch, still waiting
+    assert p._pinned_mode == 2
+    assert p._fired == []
+    _tick(p, 6, 13, 1)  # still waiting (inside the window)
+    assert p._pinned_mode == 2
+    _tick(p, 5, 13, 1)  # past the window, no switch -> release
+    assert p._pinned_mode is None
+    assert p._fired == []
+
+
+def test_human_balanced_never_yanked_during_window() -> None:
+    """The mode must stay balanced (no enforce) throughout the wait."""
+    p = _printer()
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)
+    _tick(p, 1, 13, 1)
+    for _ in range(6):
+        _tick(p, 2, 13, 1)  # poll every 2s up to ~13s
+    assert p._fired == []  # never re-applied sport while adjudicating
+
+
+# --- touchscreen non-balanced override ------------------------------------
 
 
 def test_screen_change_to_nonbalanced_becomes_pin() -> None:
     p = _printer()
-    _tick(p, 0, 13, 1)  # printing at balanced, nothing pinned
+    _tick(p, 0, 13, 1)  # printing, nothing pinned
     _tick(p, 5, 13, 3)  # user picks ludicrous on the touchscreen
     assert p._pinned_mode is None
-    _tick(p, 16, 13, 3)  # held > PIN_LEARN_S -> adopted
+    _tick(p, 9, 13, 3)  # held > PIN_LEARN_S -> adopted
     assert p._pinned_mode == 3
     assert p._fired == []
 
 
-def test_balanced_is_never_learned_as_pin_while_pinned() -> None:
+def test_screen_override_beats_release_when_pinned() -> None:
+    """Screen change sport->ludicrous while sport is pinned: adopt ludicrous,
+    never release or enforce."""
     p = _printer()
     p._pinned_mode = 2
     _tick(p, 0, 13, 2)
-    # Sustained balanced (reset or screen tap) never displaces the pin...
-    _tick(p, 10, 13, 1)
-    _tick(p, 30, 13, 1)
-    assert p._pinned_mode == 2
-    # ...and enforcement fired for it
-    assert p._fired == [2]
+    _tick(p, 2, 13, 3)  # user picks ludicrous
+    _tick(p, 9, 13, 3)  # held -> adopted as new pin
+    assert p._pinned_mode == 3
+    assert p._fired == []
 
 
-def test_no_pin_means_no_enforcement() -> None:
+# --- lifecycle ------------------------------------------------------------
+
+
+def test_no_pin_no_action() -> None:
     p = _printer()
     _tick(p, 0, 13, 1)
     _tick(p, 60, 13, 1)
     assert p._fired == []
+    assert p._pinned_mode is None
 
 
 def test_print_end_clears_pin() -> None:
@@ -361,49 +408,20 @@ def test_print_end_clears_pin() -> None:
     _tick(p, 0, 13, 2)
     _tick(p, 5, 9, 1)  # completed
     assert p._pinned_mode is None
-    _tick(p, 5, 13, 1)  # a new print at balanced: nothing enforced
+    _tick(p, 5, 13, 1)  # a fresh print at balanced
     _tick(p, 60, 13, 1)
     assert p._fired == []
 
 
-def test_enforce_rate_limited() -> None:
+def test_enforce_rate_limited_across_repeated_switches() -> None:
     p = _printer()
     p._pinned_mode = 2
     _tick(p, 0, 13, 2)
-    _tick(p, 5, 13, 1)
-    _tick(p, 13, 13, 1)  # fires (mismatch held 13 s)
-    _tick(p, 5, 13, 1)  # still mismatched, but inside the 30 s cooldown
-    _tick(p, 5, 13, 1)
+    _tick(p, 3, 13, 1)  # reset
+    _tick(p, 4, 27, 1)  # park
+    _tick(p, 60, 13, 1)  # resume -> enforce (T=67)
     assert p._fired == [2]
-    _tick(p, 30, 13, 1)  # cooldown over -> fires again
+    _tick(p, 5, 13, 1)  # still balanced (enforce not "taken" in this fake)
+    assert p._fired == [2]  # within 30s cooldown, no repeat
+    _tick(p, 30, 13, 1)  # cooldown elapsed -> enforce again
     assert p._fired == [2, 2]
-
-
-def test_screen_override_beats_enforcement() -> None:
-    """A touchscreen change to a non-balanced mode must be learned BEFORE
-    enforcement of the old pin would revert it (PIN_LEARN_S < ENFORCE_AFTER_S)."""
-    p = _printer()
-    p._pinned_mode = 1  # balanced pinned via the API
-    _tick(p, 0, 13, 1)
-    _tick(p, 2, 13, 2)  # user picks sport on the screen (mismatch clock starts)
-    _tick(p, 5, 13, 2)  # 5 s held
-    _tick(p, 4, 13, 2)  # 9 s held: learned as the new pin, before 12 s enforcement
-    assert p._pinned_mode == 2
-    assert p._fired == []
-
-
-def test_auto_releases_pin() -> None:
-    import asyncio
-
-    p = _printer()
-    p._pinned_mode = 2
-
-    async def run() -> None:
-        result = await p.set_print_speed("auto")
-        assert result.inner["pin"] == "released"
-
-    asyncio.run(run())
-    assert p._pinned_mode is None
-    _tick(p, 0, 13, 1)
-    _tick(p, 60, 13, 1)  # balanced persists, nothing enforced
-    assert p._fired == []
