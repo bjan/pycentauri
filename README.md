@@ -116,6 +116,50 @@ are silently ignored by the firmware:
 
 Speed changes only take effect while a print is actively running.
 
+#### CC2 speed pinning (the firmware fights you, so pycentauri fights back)
+
+The CC2 firmware **resets the speed mode back to balanced on its own**,
+repeatedly, during a print: on every Canvas filament switch, and on the
+brief nozzle-wipe / purge operations at the chute that happen every
+couple of minutes. Set sport once and the printer quietly drops you to
+balanced a minute later. This is firmware behavior; it happens whether
+you set the speed from pycentauri or from the printer's own touchscreen.
+
+pycentauri works around it with **pin-and-enforce** (CC2 only, requires
+`--enable-control`):
+
+- **Whatever mode you select gets pinned.** Set it via pycentauri (pins
+  immediately) or on the touchscreen (pinned after it holds a few
+  seconds — the firmware never *resets* to a non-balanced mode, so a
+  sustained sport/ludicrous/silent must be a human).
+- **The pin is enforced.** Any time the printer drifts off your pinned
+  mode for more than ~12 seconds while printing, pycentauri re-applies
+  it. Your choice wins, no matter how often the firmware resets.
+- **The pin clears when the print ends.**
+
+There is exactly one case pin-and-enforce cannot handle automatically:
+**selecting `balanced` on the touchscreen while a faster mode is
+pinned.** On the wire, a human tapping "balanced" is byte-for-byte
+identical to the firmware's own reset-to-balanced (verified by packet
+capture), so pycentauri can't tell them apart and will treat your tap
+as one more reset to correct. For that case, use **Auto**:
+
+```sh
+centauri speed auto --host <cc2-ip> --access-code <code> --enable-control
+```
+
+or the **Auto** button in the web UI, or `POST /print/speed` with
+`{"mode": "auto"}`. Auto **releases the pin** and hands speed control
+back to the printer and its touchscreen — it sends no speed command
+itself, it just stops enforcing. Pick any real mode again and the pin
+comes back.
+
+Mental model: **selecting a mode means "hold it here no matter what."
+Auto means "let go, I'll drive."**
+
+The CC1 has none of this — its speed mode stays where you put it, so
+`set_print_speed` is a plain one-shot there.
+
 ## Python library
 
 ```python
@@ -357,14 +401,12 @@ reports code 27 the entire time the head is parked there mid-print.
   cooldown of a few seconds during which the broker silently drops
   responses. pycentauri's polling cadence stays under it; your scripts
   should too.
-- **The firmware keeps resetting the speed mode to balanced.** Around
-  every Canvas filament switch (starting seconds *before* the head
-  parks), and occasionally mid-print with no switch at all. pycentauri
-  pins the mode you set and re-applies it whenever the printer drifts
-  from it for more than ~12 s while printing (needs
-  `--enable-control`). Caveat: while a mode is pinned, picking
-  *balanced* on the touchscreen looks identical to a firmware reset
-  and will be reverted — set balanced through pycentauri instead.
+- **The firmware keeps resetting the speed mode to balanced** during a
+  print (filament switches, nozzle wipes, purges). pycentauri pins your
+  chosen mode and re-applies it automatically — see
+  [CC2 speed pinning](#cc2-speed-pinning-the-firmware-fights-you-so-pycentauri-fights-back)
+  above for how it works and the one case (`balanced` from the
+  touchscreen) that needs the Auto button.
 - **Registrations expire without an app-level PING.** The printer
   forgets a registered client after several quiet minutes and silently
   stops answering that session's requests — the MQTT connection itself
