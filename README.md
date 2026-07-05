@@ -1,29 +1,33 @@
 # pycentauri
 
-Local-network toolkit for the [Elegoo Centauri
-Carbon](https://www.elegoo.com/) 3D printer. Python library, CLI, MCP
-server, REST/SSE server, built-in web UI, and an RTSP bridge — all
-powered by the same async client.
+Local-network toolkit for [Elegoo Centauri Carbon](https://www.elegoo.com/)
+3D printers — the **original Centauri Carbon (CC1)** and the **Centauri
+Carbon 2 (CC2)**. One async client, six surfaces: Python library, CLI,
+MCP server for AI agents, REST/SSE HTTP server, built-in web dashboard,
+and an RTSP bridge for your NVR.
 
-`pycentauri` speaks the printer's native SDCP v3 protocol over its local
-WebSocket (port 3030) — no cloud account required. It exposes six surfaces:
+No cloud account, no Elegoo servers — everything talks directly to the
+printer on your LAN. `pycentauri` auto-detects which model it's talking
+to and speaks the right protocol:
 
-1. An **async Python library** for direct integration.
-2. A **`centauri` CLI** for quick status checks, snapshots, and control.
-3. An **MCP server** so AI agents (Claude Code, Claude Desktop, Cursor, any
-   MCP-compatible client) can monitor and drive the printer as a tool.
-4. An **HTTP + SSE server** for dashboards, reverse-proxy integration, and
-   anything that wants a plain REST API.
-5. A **built-in web UI** (industrial instrument-panel theme, mobile-friendly)
-   served at `/ui/` by the HTTP server.
-6. An **RTSP bridge** that re-streams the printer's MJPEG webcam as
-   H.264/RTSP for Home Assistant, Jellyfin, VLC, Frigate, and NVRs.
+| | CC1 | CC2 |
+|---|---|---|
+| Transport | SDCP v3 over WebSocket (`:3030`) | JSON-RPC over MQTT (`:1883`) |
+| Auth | none | access code (printer screen) |
+| Discovery | UDP broadcast | direct IP + HTTP bootstrap |
+| Webcam | MJPEG `:3031` | MJPEG `:8080` |
+| Live head speed | — | ✓ (`gcode_move.speed` ÷ 60 = the screen's mm/s readout) |
+| Fan channels | 3 | 5 |
+| Canvas multi-filament | — | ✓ (status + auto-refill) |
+| Filament-switch detection | — | ✓ (position-based) |
 
-> **Status:** alpha. The protocol has been reverse-engineered from the official
-> [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link) C++ SDK and the
-> [`CentauriLink`](https://github.com/CentauriLink/Centauri-Link) project. It
-> works against the original Centauri Carbon on current firmware (tested on
-> V1.1.46). The newer Centauri Carbon 2 (which uses MQTT) is not supported.
+> **Status:** alpha, but used daily against real printers. Protocols were
+> reverse-engineered from Elegoo's official
+> [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link) C++ SDK, the
+> [`CentauriLink`](https://github.com/CentauriLink/Centauri-Link) project,
+> and live wire captures. CC1 tested on firmware V1.1.46 and OpenCentauri
+> V0.3.0-o; CC2 tested on firmware 01.03.02.51. Full wire-protocol notes
+> live in [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ## Install
 
@@ -34,209 +38,383 @@ pip install "pycentauri[server]"          # + HTTP REST/SSE server + web UI
 pip install "pycentauri[mcp,server]"      # all Python surfaces
 ```
 
-The RTSP bridge additionally requires [MediaMTX](https://github.com/bluenviron/mediamtx/releases)
-and `ffmpeg` on `$PATH` — see the RTSP section below for install hints.
+The RTSP bridge additionally requires
+[MediaMTX](https://github.com/bluenviron/mediamtx/releases) and `ffmpeg`
+on `$PATH`.
 
-## Quick start — CLI
+Python 3.10+. Core dependencies: `websockets`, `paho-mqtt`, `httpx`,
+`typer`, `pydantic`.
+
+## Connecting to your printer
+
+**CC1** needs only its IP (or nothing at all — it answers UDP discovery).
+
+**CC2** needs its IP *and* its access code, found on the printer's
+touchscreen under network/connectivity settings. Pass it as
+`--access-code` / `access_code=` / `PYCENTAURI_ACCESS_CODE`. The examples
+below use `Ab3dEf` as a stand-in — substitute your own.
+
+Every CLI command accepts `--host` (env: `PYCENTAURI_HOST`). With no host
+given, commands try UDP discovery, which only finds CC1s.
+
+## CLI
 
 ```sh
-# Find printers on your LAN
+# Discovery (CC1 only — CC2 doesn't answer broadcasts)
 centauri discover
 
-# One-shot status (pretty or JSON)
-centauri status --host 192.168.1.209
-centauri status --host 192.168.1.209 --json
-
-# Stream live status updates
-centauri watch --host 192.168.1.209
-
-# Grab a webcam snapshot
-centauri snapshot --host 192.168.1.209 shot.jpg
-
-# Printer attributes (model, firmware, mainboard ID, capabilities)
+# Status, attributes, live watch, snapshot
+centauri status     --host 192.168.1.209                        # CC1
+centauri status     --host 192.168.1.189 --access-code Ab3dEf   # CC2
+centauri status     --host 192.168.1.209 --json
 centauri attributes --host 192.168.1.209
+centauri watch      --host 192.168.1.209
+centauri snapshot   --host 192.168.1.209 shot.jpg
 
-# Control actions — require --enable-control
+# Print control — all writes require --enable-control
 centauri print start cube.gcode --host 192.168.1.209 --enable-control
 centauri print pause            --host 192.168.1.209 --enable-control
 centauri print resume           --host 192.168.1.209 --enable-control
 centauri print stop             --host 192.168.1.209 --enable-control
 
-# Live adjust — speed mode, fans, heaters (only effective mid-print for speed)
-centauri speed sport --host 192.168.1.209 --enable-control
+# Live adjust while printing
+centauri speed sport                            --host 192.168.1.209 --enable-control
 centauri fan  --model 100 --aux 60 --chamber 30 --host 192.168.1.209 --enable-control
-centauri temp --nozzle 215 --bed 60            --host 192.168.1.209 --enable-control
+centauri temp --nozzle 215 --bed 60             --host 192.168.1.209 --enable-control
+
+# Canvas multi-filament (CC2 only)
+centauri canvas       --host 192.168.1.189 --access-code Ab3dEf
+centauri refill --on  --host 192.168.1.189 --access-code Ab3dEf --enable-control
 ```
 
-The four speed modes (`silent`, `balanced`, `sport`, `ludicrous`) map to
-the firmware's only-accepted `PrintSpeedPct` values (50, 100, 130, 160) —
-arbitrary intermediate percentages are silently dropped by the firmware.
+`centauri canvas` prints each tray's filament, color, temperature range,
+and loaded state:
 
-The host can also come from the `PYCENTAURI_HOST` environment variable.
-If neither is set, every command auto-discovers via a 2.5 s UDP broadcast
-and bails out if it finds zero or more than one printer.
+```
+auto_refill  : OFF
+active_tray  : none
+connected    : yes
 
-## Quick start — Python
+canvas #0:
+  ● tray 0: PLA Wood (PLA) #F72221 [190-230°C]
+  ● tray 1: PLA Wood (PLA) #AF7832 [190-230°C]
+  ● tray 2: PETG (PETG) #A03BF7 [230-260°C]
+  ● tray 3: PLA Wood (PLA) #D2C5A3 [190-230°C]
+```
+
+### Speed modes
+
+Both printers accept exactly four speed settings — arbitrary percentages
+are silently ignored by the firmware:
+
+| Mode | CC1 wire value (`PrintSpeedPct`) | CC2 wire value (`speed_mode`) |
+|---|---|---|
+| `silent` | 50 | 0 |
+| `balanced` | 100 | 1 |
+| `sport` | 130 | 2 |
+| `ludicrous` | 160 | 3 |
+
+Speed changes only take effect while a print is actively running.
+
+## Python library
 
 ```python
 import asyncio
-from pycentauri import Printer
+from pycentauri import Printer, CC2Printer, connect_auto
 
 async def main():
+    # Explicit CC1
     async with await Printer.connect("192.168.1.209") as printer:
-        status = await printer.status()
-        print(status.print_status, status.progress, status.temp_nozzle)
+        st = await printer.status()
+        print(st.print_status, st.progress, st.temp_nozzle)
 
-        jpeg = await printer.snapshot()
-        with open("shot.jpg", "wb") as f:
-            f.write(jpeg)
+    # Explicit CC2
+    async with await CC2Printer.connect("192.168.1.189", access_code="Ab3dEf") as printer:
+        st = await printer.status()
+        print(st.temp_nozzle, st.raw["_cc2"]["gcode_move_speed"])  # mm/min; ÷60 = screen's mm/s
 
-        async for update in printer.watch():
-            print(update.print_status, update.progress)
+        canvas = await printer.canvas_status()
+        for unit in canvas.canvas_list:
+            for tray in unit.tray_list:
+                print(tray.tray_id, tray.filament_name, tray.filament_color)
+
+    # Auto-detect — port-probes :3030 vs :1883 and returns the right class
+    async with await connect_auto("192.168.1.189", access_code="Ab3dEf") as printer:
+        attrs = await printer.attributes()
+        print(attrs.machine_name, attrs.firmware_version)
 
 asyncio.run(main())
 ```
 
-Control actions (`start_print`, `pause`, `resume`, `stop`,
-`set_print_speed`, `set_fan_speed`, `set_temperatures`) require
-`Printer.connect(..., enable_control=True)`. The mode-to-value map for
-print speed is also exposed as `Printer.PRINT_SPEED_MODES` for callers
-that want to render their own picker.
+Both classes expose the same API: `status()`, `attributes()`, `watch()`
+(async iterator of live status), `snapshot()`, `start_print()`, `pause()`,
+`resume()`, `stop()`, `set_print_speed()`, `set_fan_speed()`,
+`set_temperatures()`, `canvas_status()`, `set_auto_refill()`. Write
+methods require `enable_control=True` at connect time and raise
+`ControlDisabledError` otherwise. Canvas methods raise `PrinterError` on
+CC1 (no Canvas support over SDCP).
 
-## Quick start — HTTP server
+CC2-only telemetry rides along in `Status.raw["_cc2"]`: the live head
+speed (`gcode_move_speed` — the commanded speed of the current move in
+**mm/min**; divide by 60 for the mm/s figure the printer's screen
+shows), `speed_mode`, filament runout sensor state,
+firmware-computed `remaining_time_sec`, `machine_status`/`sub_status`
+raw codes, and `external_device` (camera / U-disk presence).
+
+## HTTP server + web UI
 
 ```sh
-# Read-only, bound to loopback so only this box can hit it:
-centauri server --host 192.168.1.209 --port 8787
+# Read-only, loopback only
+centauri server --host 192.168.1.209
 
-# Read + write + RTSP, bound to all interfaces (put a reverse proxy in front):
+# Read + write + RTSP, on the LAN (put an authenticating proxy in front)
 centauri server --host 192.168.1.209 --bind 0.0.0.0 --port 8787 \
                 --enable-control --rtsp
+
+# CC2
+centauri server --host 192.168.1.189 --access-code Ab3dEf \
+                --bind 0.0.0.0 --port 8787 --enable-control
 ```
+
+The server holds a single long-lived connection to the printer
+(WebSocket for CC1, MQTT for CC2) with automatic reconnect and
+exponential backoff — it will never exhaust CC1's 5-connection limit.
+
+The **web UI** at `/ui/` is a clean dark dashboard, mobile-friendly and
+dependency-free (no CDN assets — works on an air-gapped LAN): live
+webcam, job progress with layer/ETA, printer state, thermals, kinematics
+(with live head speed on CC2), pause/resume/stop, speed-mode selector,
+fan and heater sliders that hydrate from live values, a Canvas panel
+with per-tray color swatches and an auto-refill toggle (CC2), and RTSP
+bridge controls. Control panels only render when the server was started
+with `--enable-control`.
+
+### Endpoints
 
 | Method | Path | Notes |
 |---|---|---|
 | `GET` | `/` | Redirects to `/ui/` |
-| `GET` | `/ui/` | Built-in web dashboard |
-| `GET` | `/api/info` | Health + version (JSON) |
-| `GET` | `/status` | Latest status push (cached; updates every ~5 s) |
-| `GET` | `/attributes` | Printer attributes |
-| `GET` | `/snapshot` | `image/jpeg` response |
-| `GET` | `/stream` | MJPEG stream proxied from the printer (embeds in `<img>`) |
-| `GET` | `/discover` | LAN scan |
-| `GET` | `/events/status` | Server-Sent Events stream of pushes |
-| `GET` | `/api/rtsp` | RTSP bridge state (when `--rtsp` is set) |
-| `POST` | `/api/rtsp/{start,stop}` | Start/stop the RTSP bridge (when `--rtsp` is set) |
-| `GET` | `/docs` / `/redoc` | Auto-generated OpenAPI docs |
-| `POST` | `/print/start` | Body: `{"filename": "cube.gcode"}`. Requires `--enable-control`. |
-| `POST` | `/print/{pause,resume,stop}` | Requires `--enable-control`. |
-| `POST` | `/print/speed` | Body: `{"mode": "silent\|balanced\|sport\|ludicrous"}` (or `50\|100\|130\|160`). |
-| `POST` | `/print/fan` | Body: `{"model": 50, "auxiliary": 30, "chamber": 0}` (any subset; 0..100). |
-| `POST` | `/print/temperature` | Body: `{"nozzle": 215, "bed": 60, "chamber": 0}` (any subset; °C). |
+| `GET` | `/ui/` | Web dashboard |
+| `GET` | `/api/info` | Health + version + connection state |
+| `GET` | `/status` | Latest status (typed summary + full `raw` payload) |
+| `GET` | `/attributes` | Model, firmware, mainboard ID |
+| `GET` | `/snapshot` | Single JPEG frame |
+| `GET` | `/stream` | MJPEG proxy (drop into an `<img>` tag) |
+| `GET` | `/events/status` | Server-Sent Events stream of status pushes |
+| `GET` | `/discover` | UDP LAN scan (finds CC1s) |
+| `GET` | `/canvas` | Canvas state (CC2; `501` on CC1) |
+| `GET` | `/docs`, `/redoc` | OpenAPI documentation |
+| `POST` | `/print/start` | `{"filename": "cube.gcode", "storage": "local"}` † |
+| `POST` | `/print/pause` · `/print/resume` · `/print/stop` | † |
+| `POST` | `/print/speed` | `{"mode": "sport"}` or `{"mode": 130}` † |
+| `POST` | `/print/fan` | `{"model": 50, "auxiliary": 30, "chamber": 0}` — any subset, 0–100 † |
+| `POST` | `/print/temperature` | `{"nozzle": 215, "bed": 60}` — any subset, °C, 0 = off † |
+| `POST` | `/canvas/refill` | `{"enabled": true}` (CC2) † |
+| `GET` | `/api/rtsp` | RTSP bridge state (when `--rtsp`) |
+| `POST` | `/api/rtsp/start` · `/api/rtsp/stop` | Toggle the bridge (when `--rtsp`) |
 
-The web UI's **ADJUST** panel exposes all three of the above as a
-4-button speed-mode selector and per-fan/heater rows with auto-hydration
-from live status.
+† requires the server to be launched with `--enable-control`; otherwise
+the route isn't registered at all.
 
-The server holds a single long-lived WebSocket to the printer and reuses
-it for every request — no per-request reconnect, and it won't bump into
-the firmware's 5-slot limit.
+Temperature writes are bounds-checked server-side: nozzle 0–300 °C,
+bed 0–110 °C, chamber 0–60 °C.
 
-## Quick start — RTSP bridge
+## MCP server (AI agents)
 
-```sh
-# Install system dependencies first:
-#   mediamtx  https://github.com/bluenviron/mediamtx/releases  (or `brew install mediamtx`)
-#   ffmpeg    `brew install ffmpeg` or `apt install ffmpeg`
-
-# Standalone: foreground, Ctrl-C to stop
-centauri rtsp --host 192.168.1.209
-# → rtsp://<this-host>:8554/printer
-
-# Or, integrated with the HTTP server + web UI
-centauri server --host 192.168.1.209 --rtsp --bind 0.0.0.0
-# The web UI gains a STREAM panel with a start/stop toggle, a copy-URL button,
-# and live status: http://<this-host>:8787/ui/
-```
-
-Open that URL in **VLC** (Media → Open Network Stream), point **Home Assistant**
-at it via the Generic Camera integration, or feed it to **Frigate** / **Jellyfin**
-/ **Synology Surveillance** for NVR recording and motion detection.
-
-MediaMTX runs the ffmpeg transcode only while at least one client is
-actually connected, so idle cost is zero. Tunable flags: `--fps`,
-`--bitrate`, `--preset`, `--path`, `--port`, `--bind` (standalone),
-or `--rtsp-fps`, `--rtsp-bitrate`, `--rtsp-path`, `--rtsp-port`,
-`--rtsp-bind` (on `centauri server`). Run `centauri rtsp --help` or
-`centauri server --help` for the full list.
-
-## Quick start — MCP
-
-Register the server with your agent. With Claude Code:
+Give Claude Code, Claude Desktop, Cursor, or any MCP client eyes and
+hands on your printer:
 
 ```sh
+# Read-only (status, snapshot, attributes, discovery, canvas)
 claude mcp add pycentauri --env PYCENTAURI_HOST=192.168.1.209 \
     -- python -m pycentauri.mcp
 
-# Or, with control actions enabled (gives the agent start/pause/resume/stop):
-claude mcp add pycentauri --env PYCENTAURI_HOST=192.168.1.209 \
+# With control tools
+claude mcp add pycentauri-cc2 \
+    --env PYCENTAURI_HOST=192.168.1.189 \
+    --env PYCENTAURI_ACCESS_CODE=Ab3dEf \
     -- python -m pycentauri.mcp --enable-control
 ```
 
-Setting `PYCENTAURI_HOST` in the MCP server's launch env means the agent
-can't be tricked into targeting an arbitrary IP through prompt injection —
-the host is pinned at spawn time. Tools exposed:
+The target host is pinned in the server's environment at spawn time — a
+prompt-injected agent cannot redirect commands to an arbitrary IP,
+because no tool takes a host parameter.
 
-| Tool | Always available | Description |
+| Tool | Availability | Description |
 |---|---|---|
-| `get_status` | yes | State, temperatures, progress, elapsed/remaining |
-| `get_attributes` | yes | Model, firmware, mainboard ID, capabilities |
-| `get_snapshot` | yes | Webcam frame as MCP `Image` content (LLMs see the picture) |
-| `discover_printers` | yes | LAN scan |
-| `start_print` | only with `--enable-control` | Starts a print from a file already on the printer |
-| `pause_print` | only with `--enable-control` | Pauses the current print |
-| `resume_print` | only with `--enable-control` | Resumes a paused print |
-| `stop_print` | only with `--enable-control` | Stops the current print |
-| `set_print_speed` | only with `--enable-control` | Sets speed mode (`silent`/`balanced`/`sport`/`ludicrous`) — only takes effect mid-print |
-| `set_fan_speed` | only with `--enable-control` | Sets any subset of model/aux/chamber fan speeds (0..100%) |
-| `set_temperatures` | only with `--enable-control` | Sets any subset of nozzle/bed/chamber heater targets (°C, 0 = off) |
+| `get_status` | always | State, temps, progress, layer, position, fans |
+| `get_attributes` | always | Model, firmware, mainboard ID |
+| `get_snapshot` | always | Webcam frame as MCP image — the model *sees* the print |
+| `discover_printers` | always | UDP LAN scan |
+| `get_canvas_status` | always | Canvas trays, colors, auto-refill (CC2) |
+| `start_print` | `--enable-control` | Start a file already on the printer |
+| `pause_print` / `resume_print` / `stop_print` | `--enable-control` | Job control |
+| `set_print_speed` | `--enable-control` | `silent`/`balanced`/`sport`/`ludicrous` |
+| `set_fan_speed` | `--enable-control` | Any subset of model/aux/chamber, 0–100% |
+| `set_temperatures` | `--enable-control` | Any subset of nozzle/bed/chamber, °C |
+| `set_auto_refill` | `--enable-control` | Canvas auto-refill toggle (CC2) |
 
-Control tools aren't just gated — they're not *registered* without the
-flag, so an LLM that wasn't given the `--enable-control` launch can't see
-them in the tool list at all.
+Control tools aren't merely gated — without the flag they are never
+registered, so they don't appear in the model's tool list at all.
 
-## Safety
+## RTSP bridge
 
-Printer control actions are gated behind an explicit `enable_control=True`
-(library) or `--enable-control` flag (CLI / MCP). Destructive MCP tools
-aren't registered when the flag is off, so an LLM never sees them. Still:
-leaving a printer running unattended with write-capable agents is your
-responsibility, as is securing the HTTP surface (it's unauthenticated — put
-a reverse proxy with auth in front if you expose it beyond loopback).
+Re-streams the printer's MJPEG webcam as H.264/RTSP for clients that
+don't speak MJPEG — Home Assistant, Frigate, Jellyfin, Synology
+Surveillance, VLC:
 
-The RTSP bridge itself isn't gated by `--enable-control` because it only
-reads the webcam feed and doesn't change printer state; it's enabled
-per-server via the `--rtsp` flag.
+```sh
+# Standalone (foreground, Ctrl-C to stop)
+centauri rtsp --host 192.168.1.209
+# → rtsp://<this-host>:8554/printer
+
+# Integrated with the HTTP server — adds a STREAM panel to the web UI
+centauri server --host 192.168.1.209 --rtsp --bind 0.0.0.0
+```
+
+MediaMTX only runs the ffmpeg transcode while a client is connected, so
+idle cost is zero. Tunables: `--fps`, `--bitrate`, `--preset`, `--path`,
+`--port` (standalone) or the `--rtsp-*` variants on `centauri server`.
+The bridge picks the correct camera port for CC1 vs CC2 automatically.
+
+## Print status codes
+
+`print_status` in the API and library uses the CC1 firmware's code
+space, extended with three codes for CC2 Canvas operations:
+
+| Code | Meaning | | Code | Meaning |
+|---|---|---|---|---|
+| 0 | Idle | | 13 | Printing |
+| 1 | Homing | | 14 | Error |
+| 5 | Pausing | | 15 | Leveling |
+| 6 | Paused | | 16 | Preheating |
+| 7 | Stopping | | **27** | **Switching filament** (CC2) |
+| 8 | Stopped | | **28** | **Filament load complete** (CC2) |
+| 9 | Completed | | **29** | **Unloading filament** (CC2) |
+
+The full table (including CC1's resin-inherited codes) is in
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md).
+
+On the CC2, mid-print Canvas filament switches are detected by head
+position: the firmware never fully leaves its "printing" state during a
+switch, but the head parks at the purge chute behind the bed (y ≥ 258 mm,
+physically outside the printable area) for the duration. pycentauri
+reports code 27 the entire time the head is parked there mid-print.
+
+## Safety model
+
+- **Explicit opt-in for writes.** Every surface requires
+  `enable_control=True` / `--enable-control` before any state-changing
+  command is possible. Read-only is the default everywhere.
+- **Bounds-checked heaters.** The library refuses temperature targets
+  outside nozzle 0–300 °C / bed 0–110 °C / chamber 0–60 °C even though
+  the firmware might accept them.
+- **Unauthenticated HTTP surface.** The REST server has no auth of its
+  own. Bind it to loopback (the default) or put an authenticating
+  reverse proxy in front before exposing it beyond localhost.
+- **You own unattended printing.** An agent with control tools can pause,
+  stop, or heat your printer. Leaving one unattended is your call.
 
 ## Known firmware quirks
 
-- **5 concurrent WebSocket connections max.** The printer's SDCP server
-  accepts up to 5 open WebSockets on port 3030; the 6th returns HTTP 500
-  with body `"too many client"`. Slots release immediately when a
-  connection closes — the CLI each opens and closes one per invocation,
-  the HTTP and MCP servers hold a single long-lived one, so this is
-  almost never a problem in practice.
-- **Paused / errored states don't auto-push Attributes.** The printer only
-  sends its `Attributes` frame spontaneously while idle or printing. In
-  paused and errored states it stays silent until asked. Since every SDCP
-  command needs the printer's `MainboardID`, the client handles this by
-  pre-seeding the mainboard ID from a UDP discovery on every connect
-  (as of v0.1.1). If you call `Printer.connect()` directly without
-  discovery, pass `mainboard_id=` yourself.
+### CC1 (original Centauri Carbon)
 
-## Credits & licensing
+- **5 concurrent WebSocket slots, hard.** The 6th connection gets HTTP
+  500 `"too many client"`. Slots free on close. The CLI opens one per
+  invocation; the HTTP/MCP servers hold exactly one long-lived slot.
+- **Paused/errored states don't push Attributes.** Every SDCP command
+  needs the printer's `MainboardID`, which normally arrives in an
+  Attributes push — but not while paused or errored. pycentauri
+  pre-seeds it from UDP discovery on every connect. If you call
+  `Printer.connect()` on a paused printer without discovery, pass
+  `mainboard_id=` yourself.
+- **Unknown commands crash the firmware.** A few unrecognised SDCP
+  commands in quick succession kill the printer's `app` daemon — and any
+  active print with it. Don't probe undocumented command codes against a
+  printer that's doing something you care about.
+- **The push scheduler goes dormant at idle (and a reboot doesn't wake
+  it).** The firmware can enter a state where `Cmd 512` subscribes are
+  acknowledged but no status frame is ever pushed while the printer
+  sits idle — persisting across reboots (verified 2026-07-05 on
+  V0.3.0-o). Starting a print revives pushes at full rate. One-shot
+  `Cmd 0` requests always work, so pycentauri automatically falls back
+  to polling when a subscribe goes quiet (~7 s updates at idle,
+  full-rate pushes while printing). Clients that rely purely on
+  subscribe pushes will hang forever on an idle printer in this state.
 
-- Protocol reference: [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link)
-  (Apache-2.0) and [`CentauriLink`](https://github.com/CentauriLink/Centauri-Link).
-- `pycentauri` is licensed under Apache-2.0. See [LICENSE](LICENSE).
-- Not affiliated with or endorsed by Elegoo.
+### CC2 (Centauri Carbon 2)
+
+- **No UDP discovery.** The CC2 ignores broadcast probes; specify its IP
+  explicitly. Give it a static DHCP lease — it doesn't register a
+  hostname with most routers, so its address drifts otherwise.
+- **Access code required for MQTT**, passed as the password with
+  username `elegoo`. The HTTP bootstrap (`/system/info`) wants the same
+  code as an `X-Token` *query parameter* — it ignores the header form.
+- **The webcam is unauthenticated.** MJPEG on `:8080` (any path) is open
+  to anyone on your LAN, access code or not. That's the firmware's
+  choice, not ours.
+- **Rate limiting.** Rapid-fire MQTT requests (3+ back-to-back) trip a
+  cooldown of a few seconds during which the broker silently drops
+  responses. pycentauri's polling cadence stays under it; your scripts
+  should too.
+- **Registrations expire without an app-level PING.** The printer
+  forgets a registered client after several quiet minutes and silently
+  stops answering that session's requests — the MQTT connection itself
+  stays up, so there's no error to catch. pycentauri sends the SDK's
+  `{"type": "PING"}` keepalive every 30 s to hold the registration; if
+  you write your own client, you must too.
+- **File list (method 1044) and video stream (1042) don't respond** on
+  firmware 01.03.02.51, so remote print-start on CC2 requires knowing
+  the filename in advance.
+
+## Project layout & docs
+
+```
+src/pycentauri/
+├── client.py      # CC1: async SDCP-over-WebSocket client
+├── cc2.py         # CC2: async JSON-RPC-over-MQTT client (same API)
+├── connect.py     # connect_auto() — port-probe model detection
+├── sdcp.py        # SDCP v3 envelope build/parse
+├── discovery.py   # UDP broadcast discovery
+├── camera.py      # MJPEG frame grabber
+├── models.py      # Status / Attributes / CanvasStatus / PrintInfo
+├── cli.py         # Typer CLI
+├── server.py      # FastAPI app + connection supervisor
+├── rtsp.py        # MediaMTX/ffmpeg bridge
+├── mcp/           # FastMCP stdio server
+└── web/           # Static dashboard (no build step, no CDN)
+```
+
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — both wire protocols in
+  detail: envelopes, command/method tables with tested-on dates, status
+  payloads, error codes, failure modes, and a CC1-vs-CC2 comparison.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module map and
+  request flow.
+
+## Development
+
+```sh
+git clone https://github.com/bjan/pycentauri && cd pycentauri
+python -m venv .venv && .venv/bin/pip install -e ".[mcp,server,dev]"
+
+.venv/bin/ruff check . && .venv/bin/ruff format --check .
+.venv/bin/mypy src          # strict mode
+.venv/bin/pytest -q         # no printer required — tests use in-process fakes
+```
+
+Tests run against an in-process fake SDCP WebSocket server plus pure
+translation-layer tests for CC2; nothing in CI touches real hardware.
+Live verification against a physical printer is manual — `centauri
+status`, `centauri canvas`, and a fan write are the standard smoke
+test after protocol-layer changes.
+
+## Credits & license
+
+- Protocol references: Elegoo's
+  [`elegoo-link`](https://github.com/ELEGOO-3D/elegoo-link) SDK
+  (Apache-2.0) and
+  [`CentauriLink`](https://github.com/CentauriLink/Centauri-Link).
+- Licensed under Apache-2.0 — see [LICENSE](LICENSE).
+- Not affiliated with or endorsed by Elegoo. Reverse-engineered
+  protocols can break with any firmware update; nothing here is
+  warranted to keep your prints alive.

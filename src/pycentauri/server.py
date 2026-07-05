@@ -1,27 +1,23 @@
 """FastAPI HTTP server exposing the printer over REST + SSE.
 
-A single long-lived :class:`~pycentauri.client.Printer` connection is held for
-the lifetime of the server and reused across requests. That keeps us
-well under the Elegoo firmware's 5-WebSocket slot limit and means
-``GET /status`` returns the in-memory cached push rather than opening a
-fresh connection on every request.
+A single long-lived connection (WebSocket for CC1, MQTT for CC2 — chosen
+by :func:`pycentauri.connect_auto`) is held for the lifetime of the
+server and reused across requests, staying well under CC1's 5-slot
+limit. On connection errors a supervisor reconnects in the background
+with exponential backoff.
 
-On WebSocket errors we reconnect in the background with exponential
-backoff. The mainboard ID learned from the first successful discovery is
-cached so reconnects don't have to wait on an Attributes push.
+Routes (start with ``centauri server``):
 
-Surfaces (register with ``centauri server``):
-
-* ``GET /`` — health and version info
-* ``GET /status`` — latest status snapshot (JSON)
-* ``GET /attributes`` — printer attributes (JSON)
-* ``GET /snapshot`` — single JPEG frame from the webcam
-* ``GET /discover`` — UDP LAN scan
-* ``GET /events/status`` — Server-Sent Events stream of live status pushes
-* ``POST /print/{start,pause,resume,stop}`` — only registered when the
-  server is launched with ``--enable-control``.
-* ``POST /print/{speed,fan,temperature}`` — runtime adjust of print speed,
-  fan speeds, and heater targets. Same ``--enable-control`` gate.
+* ``GET /`` — redirect to ``/ui/`` (the web dashboard)
+* ``GET /api/info`` — health, version, and connection state (JSON)
+* ``GET /status`` / ``GET /attributes`` — printer state (JSON)
+* ``GET /snapshot`` / ``GET /stream`` — webcam JPEG / MJPEG proxy
+* ``GET /events/status`` — Server-Sent Events stream of status pushes
+* ``GET /discover`` — UDP LAN scan (finds CC1s)
+* ``GET /canvas`` — Canvas multi-filament state (CC2)
+* ``GET|POST /api/rtsp*`` — RTSP bridge state/control (with ``--rtsp``)
+* ``POST /print/{start,pause,resume,stop,speed,fan,temperature}`` and
+  ``POST /canvas/refill`` — registered only with ``--enable-control``.
 """
 
 from __future__ import annotations
@@ -45,8 +41,14 @@ from sse_starlette.sse import EventSourceResponse
 
 from pycentauri import __version__
 from pycentauri import rtsp as rtsp_module
-from pycentauri.camera import CAMERA_PATH, CAMERA_PORT
-from pycentauri.client import ControlDisabledError, Printer, PrinterError
+from pycentauri.camera import CAMERA_PATH
+from pycentauri.client import (
+    ControlDisabledError,
+    Printer,
+    PrinterError,
+    RequestTimeoutError,
+)
+from pycentauri.connect import connect_auto
 from pycentauri.discovery import DiscoveredPrinter
 from pycentauri.discovery import discover as lan_discover
 
@@ -72,10 +74,14 @@ class PrinterManager:
         *,
         enable_control: bool = False,
         mainboard_id: str | None = None,
+        access_code: str | None = None,
+        rtsp_config: rtsp_module.RtspConfig | None = None,
     ) -> None:
         self.host = host
         self.enable_control = enable_control
+        self.access_code = access_code
         self._mainboard_id = mainboard_id
+        self._rtsp_config = rtsp_config
         self._printer: Printer | None = None
         self._supervisor: asyncio.Task[None] | None = None
         self._ready = asyncio.Event()
@@ -119,24 +125,37 @@ class PrinterManager:
                         break
 
             try:
-                self._printer = await Printer.connect(
+                self._printer = await connect_auto(
                     self.host,
                     enable_control=self.enable_control,
                     mainboard_id=self._mainboard_id,
+                    access_code=self.access_code,
                 )
-                # Prime the subscription so status pushes start flowing.
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(
-                        self._printer._ensure_subscribed(),
-                        timeout=5.0,
-                    )
+                # CC1: prime subscription so status pushes flow.
+                # CC2: no-op (status is polled or pushed via MQTT).
+                if hasattr(self._printer, "_ensure_subscribed"):
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            self._printer._ensure_subscribed(),
+                            timeout=5.0,
+                        )
                 log.info("connected to %s", self.host)
+                # The MJPEG port differs per model (CC1 :3031, CC2 :8080)
+                # and we only know which we got after connecting.
+                if self._rtsp_config is not None:
+                    self._rtsp_config.camera_port = self._printer.camera_port
                 self._ready.set()
                 backoff = RECONNECT_BACKOFF_START
-                # Hold until the reader dies (disconnect).
-                reader = self._printer._reader
+                # CC1: hold until the WS reader dies (disconnect).
+                # CC2: hold until the MQTT loop ends (or we close).
+                reader = getattr(self._printer, "_reader", None)
                 if reader is not None:
                     await reader
+                else:
+                    # CC2: just sleep until closed; the MQTT loop_start
+                    # thread handles reconnects internally.
+                    while not self._closing and not self._printer._closed:
+                        await asyncio.sleep(2.0)
             except Exception as e:
                 log.warning("connection to %s failed: %r", self.host, e)
 
@@ -280,19 +299,27 @@ def create_app(
     *,
     enable_control: bool = False,
     mainboard_id: str | None = None,
+    access_code: str | None = None,
     rtsp_config: rtsp_module.RtspConfig | None = None,
 ) -> FastAPI:
     """Build the FastAPI app. ``host`` is the printer's IP/hostname.
 
     The app runs a single background :class:`PrinterManager` that owns the
-    WebSocket lifecycle. Control endpoints are registered only when
-    ``enable_control`` is ``True``. ``rtsp_config`` enables the
-    ``/api/rtsp/*`` endpoints and the "STREAM" panel in the web UI.
+    connection lifecycle (WebSocket for CC1, MQTT for CC2 — auto-detected).
+    Control endpoints are registered only when ``enable_control`` is ``True``.
+    ``rtsp_config`` enables the ``/api/rtsp/*`` endpoints and the "STREAM"
+    panel in the web UI.
     """
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        manager = PrinterManager(host, enable_control=enable_control, mainboard_id=mainboard_id)
+        manager = PrinterManager(
+            host,
+            enable_control=enable_control,
+            mainboard_id=mainboard_id,
+            access_code=access_code,
+            rtsp_config=rtsp_config,
+        )
         app.state.manager = manager
         app.state.rtsp = RtspController(rtsp_config) if rtsp_config is not None else None
         await manager.start()
@@ -389,26 +416,46 @@ def create_app(
         proxy it through the API server so the UI never needs to know the
         printer's IP and so cross-origin isn't an issue.
         """
-        url = f"http://{manager.host}:{CAMERA_PORT}{CAMERA_PATH}"
-        client = httpx.AsyncClient(timeout=None)
+        cam_port = manager.printer.camera_port
+        url = f"http://{manager.host}:{cam_port}{CAMERA_PATH}"
+        # read=None is deliberate (MJPEG never ends); connect must be
+        # bounded or a wedged printer hangs every /stream request forever.
+        client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
+        )
+
+        # Open the upstream connection *before* building the response so we
+        # can forward its Content-Type verbatim — the multipart boundary
+        # string differs between CC1 and CC2 firmware.
+        try:
+            upstream_cm = client.stream("GET", url)
+            upstream = await upstream_cm.__aenter__()
+        except Exception as err:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=f"webcam unreachable: {err}") from err
+        if upstream.status_code != 200:
+            await upstream_cm.__aexit__(None, None, None)
+            await client.aclose()
+            raise HTTPException(
+                status_code=502, detail=f"webcam returned HTTP {upstream.status_code}"
+            )
+        media_type = upstream.headers.get(
+            "content-type", "multipart/x-mixed-replace; boundary=frame"
+        )
 
         async def body() -> AsyncIterator[bytes]:
             try:
-                async with client.stream("GET", url) as upstream:
-                    if upstream.status_code != 200:
-                        return
-                    async for chunk in upstream.aiter_raw():
-                        yield chunk
+                async for chunk in upstream.aiter_raw():
+                    yield chunk
             except Exception as err:
                 log.warning("MJPEG proxy error: %r", err)
             finally:
                 with contextlib.suppress(Exception):
+                    await upstream_cm.__aexit__(None, None, None)
+                with contextlib.suppress(Exception):
                     await client.aclose()
 
-        return StreamingResponse(
-            body(),
-            media_type="multipart/x-mixed-replace; boundary=--foo",
-        )
+        return StreamingResponse(body(), media_type=media_type)
 
     @app.get("/discover", tags=["read"])
     async def discover_endpoint() -> list[dict[str, Any]]:
@@ -444,6 +491,23 @@ def create_app(
                 yield {"event": "error", "data": str(err)}
 
         return EventSourceResponse(gen())
+
+    # --- Canvas -------------------------------------------------------------
+
+    @app.get("/canvas", tags=["read"])
+    async def canvas_status(
+        manager: PrinterManager = Depends(get_manager),
+    ) -> dict[str, Any]:
+        """Canvas multi-filament system status (CC2 only)."""
+        try:
+            cs = await manager.printer.canvas_status()
+        except RequestTimeoutError as err:
+            # Transient (e.g. the CC2's rate-limit cooldown) — not a
+            # capability gap. 504 so clients know to retry.
+            raise HTTPException(status_code=504, detail=str(err)) from err
+        except PrinterError as err:
+            raise HTTPException(status_code=501, detail=str(err)) from err
+        return cs.raw
 
     # --- RTSP bridge --------------------------------------------------------
 
@@ -545,6 +609,12 @@ def create_app(
 
     # --- Control endpoints (registered only when --enable-control) ----------
 
+    def _sent_unconfirmed(verb: str, err: Exception) -> str:
+        return (
+            f"{verb} command was sent but the printer did not confirm in time "
+            f"({err}). It may still complete — check the printer status."
+        )
+
     @app.post("/print/start", tags=["control"])
     async def start_print(
         body: StartPrintBody, manager: PrinterManager = Depends(require_control)
@@ -558,6 +628,8 @@ def create_app(
             )
         except ControlDisabledError as err:
             raise HTTPException(status_code=403, detail=str(err)) from err
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=_sent_unconfirmed("start", err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
@@ -568,6 +640,8 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             result = await manager.printer.pause()
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=_sent_unconfirmed("pause", err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
@@ -578,6 +652,8 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             result = await manager.printer.resume()
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=_sent_unconfirmed("resume", err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
@@ -588,6 +664,8 @@ def create_app(
     ) -> dict[str, Any]:
         try:
             result = await manager.printer.stop()
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=_sent_unconfirmed("stop", err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
@@ -634,6 +712,19 @@ def create_app(
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
 
+    class RefillBody(BaseModel):
+        enabled: bool = Field(..., description="true to enable auto-refill, false to disable.")
+
+    @app.post("/canvas/refill", tags=["control"])
+    async def set_refill(
+        body: RefillBody, manager: PrinterManager = Depends(require_control)
+    ) -> dict[str, Any]:
+        try:
+            result = await manager.printer.set_auto_refill(body.enabled)
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        return {"ok": True, "response": result.inner}
+
     return app
 
 
@@ -644,6 +735,7 @@ def run(
     port: int = 8787,
     enable_control: bool = False,
     mainboard_id: str | None = None,
+    access_code: str | None = None,
     log_level: str = "info",
     rtsp_config: rtsp_module.RtspConfig | None = None,
 ) -> None:
@@ -651,7 +743,7 @@ def run(
 
     Defaults bind to loopback. Set ``bind="0.0.0.0"`` to expose on the LAN —
     in that case put an authenticating reverse proxy in front, since the
-    HTTP surface itself is unauthenticated in v0.2.
+    HTTP surface itself is unauthenticated.
     """
     import uvicorn
 
@@ -659,9 +751,20 @@ def run(
         host,
         enable_control=enable_control,
         mainboard_id=mainboard_id,
+        access_code=access_code,
         rtsp_config=rtsp_config,
     )
-    uvicorn.run(app, host=bind, port=port, log_level=log_level)
+    # Bound graceful shutdown: open SSE/MJPEG streams never close on
+    # their own, and without a timeout uvicorn waits for them forever —
+    # leaving a zombie process that still holds a printer connection
+    # (observed twice: 2026-06-23 and 2026-07-05).
+    uvicorn.run(
+        app,
+        host=bind,
+        port=port,
+        log_level=log_level,
+        timeout_graceful_shutdown=5,
+    )
 
 
 __all__ = ["JSONResponse", "PrinterManager", "create_app", "run"]

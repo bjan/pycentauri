@@ -22,7 +22,7 @@ from websockets.asyncio.client import ClientConnection, connect
 
 from pycentauri import camera as camera_module
 from pycentauri import sdcp
-from pycentauri.models import Attributes, Status
+from pycentauri.models import Attributes, CanvasStatus, Status
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,11 @@ class Printer:
         """Mainboard ID learned from the printer (set once the first Attributes push arrives)."""
         return self._mainboard_id
 
+    @property
+    def camera_port(self) -> int:
+        """Port the webcam MJPEG stream is served on."""
+        return camera_module.CAMERA_PORT
+
     async def wait_for_mainboard(self, timeout: float = 5.0) -> str:
         """Block until the printer has reported its mainboard ID.
 
@@ -169,12 +174,26 @@ class Printer:
         """Get the current printer status.
 
         If we've already received a push, return it immediately. Otherwise
-        subscribe briefly (Cmd 512) and wait for the first push.
+        subscribe (Cmd 512) and wait one push period for the first push;
+        if none arrives, explicitly request a status frame with Cmd 0.
+        The firmware's periodic push scheduler can wedge (Cmd 512 is
+        ACKed but nothing is ever pushed — observed live on V0.3.0-o,
+        2026-07-04) while the request path stays healthy, and Cmd 0 is
+        documented to emit one status frame on the status topic.
         """
         if self._latest_status is not None:
             return self._latest_status
         await self._ensure_subscribed()
-        await asyncio.wait_for(self._latest_status_event.wait(), timeout=timeout)
+        try:
+            await asyncio.wait_for(
+                self._latest_status_event.wait(),
+                timeout=self.push_period_ms / 1000.0 + 1.0,
+            )
+        except asyncio.TimeoutError:
+            mid = await self.wait_for_mainboard(timeout=timeout)
+            with contextlib.suppress(RequestTimeoutError):
+                await self._request(sdcp.Cmd.GET_PRINTER_STATUS, None, mid, timeout=8.0)
+            await asyncio.wait_for(self._latest_status_event.wait(), timeout=timeout)
         assert self._latest_status is not None
         return self._latest_status
 
@@ -189,21 +208,55 @@ class Printer:
         return self._latest_attributes
 
     async def watch(self) -> AsyncIterator[Status]:
-        """Yield status updates as they arrive from the printer."""
+        """Yield status updates as they arrive from the printer.
+
+        If the periodic pushes stall (wedged push scheduler — see
+        :meth:`status`), actively request a status frame (Cmd 0) once
+        per push period. The requested frame arrives on the status topic
+        and flows through the same queue, so the stream never starves.
+        """
         await self._ensure_subscribed()
+        interval = self.push_period_ms / 1000.0
         queue: asyncio.Queue[Status] = asyncio.Queue(maxsize=64)
         self._status_queues.add(queue)
         try:
             if self._latest_status is not None:
                 queue.put_nowait(self._latest_status)
             while not self._closed:
-                yield await queue.get()
+                try:
+                    yield await asyncio.wait_for(queue.get(), timeout=interval + 2)
+                except asyncio.TimeoutError:
+                    mid = await self.wait_for_mainboard()
+                    with contextlib.suppress(PrinterError):
+                        await self._request(sdcp.Cmd.GET_PRINTER_STATUS, None, mid, timeout=8.0)
         finally:
             self._status_queues.discard(queue)
 
     async def snapshot(self, *, timeout: float = camera_module.DEFAULT_TIMEOUT) -> bytes:
         """Return a single JPEG frame from the built-in webcam."""
         return await camera_module.snapshot(self.host, timeout=timeout)
+
+    async def canvas_status(self) -> CanvasStatus:
+        """Return the Canvas multi-filament system state.
+
+        Raises :class:`PrinterError` on printers without Canvas support.
+        The SDK lists ``Cmd 324`` (GET_CANVAS_STATUS) for CC1 SDCP but it
+        is unprobed against real CC firmware — and unknown Cmds can crash
+        the CC1's ``app`` daemon, so pycentauri won't send it blind.
+        Canvas support currently requires a CC2 (MQTT method 2005).
+        """
+        raise PrinterError(
+            "Canvas is not implemented for the CC1 (SDCP Cmd 324 is unprobed "
+            "and unknown Cmds can crash the firmware). Canvas support "
+            "currently requires a Centauri Carbon 2 (MQTT method 2005)."
+        )
+
+    async def set_auto_refill(self, enabled: bool) -> sdcp.ParsedMessage:
+        """Toggle Canvas auto-refill. CC2 only — see :meth:`canvas_status`."""
+        raise PrinterError(
+            "Canvas auto-refill is not implemented for the CC1. It currently "
+            "requires a Centauri Carbon 2 (MQTT method 2004)."
+        )
 
     # --- control actions (gated) ----------------------------------------------
 

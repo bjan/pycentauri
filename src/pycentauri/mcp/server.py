@@ -25,9 +25,11 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP, Image
 
 from pycentauri.client import Printer
+from pycentauri.connect import connect_auto
 from pycentauri.discovery import discover as _lan_discover
 
 _HOST_ENV = "PYCENTAURI_HOST"
+_ACCESS_CODE_ENV = "PYCENTAURI_ACCESS_CODE"
 
 
 def _resolve_host() -> str:
@@ -58,6 +60,20 @@ async def _resolve_target() -> tuple[str, str | None]:
     return host, None
 
 
+def _access_code() -> str | None:
+    return os.environ.get(_ACCESS_CODE_ENV)
+
+
+async def _open(*, enable_control: bool = False) -> Printer:
+    host, mid = await _resolve_target()
+    return await connect_auto(
+        host,
+        enable_control=enable_control,
+        mainboard_id=mid,
+        access_code=_access_code(),
+    )
+
+
 def build_server(*, enable_control: bool = False) -> FastMCP:
     """Construct the FastMCP server, registering tools per the control flag.
 
@@ -73,11 +89,10 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         Includes state code, job filename, progress %, layer, temperatures
         (nozzle / bed / chamber), fan speeds, and the raw SDCP payload.
         """
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, mainboard_id=mid) as printer:
+        async with await _open() as printer:
             st = await printer.status()
         return {
-            "host": host,
+            "host": printer.host,
             "state": st.state,
             "print_status": st.print_status,
             "progress": st.progress,
@@ -100,11 +115,10 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
     @mcp.tool()
     async def get_attributes() -> dict[str, Any]:
         """Return printer attributes: model, firmware, mainboard ID, capabilities."""
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, mainboard_id=mid) as printer:
+        async with await _open() as printer:
             attrs = await printer.attributes()
         return {
-            "host": host,
+            "host": printer.host,
             "mainboard_id": attrs.mainboard_id,
             "name": attrs.name,
             "machine_name": attrs.machine_name,
@@ -120,8 +134,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         The image is returned inline so the agent can see what the printer
         is currently doing (e.g. to spot layer shifts or spaghetti).
         """
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, mainboard_id=mid) as printer:
+        async with await _open() as printer:
             jpeg = await printer.snapshot()
         return Image(data=jpeg, format="jpeg")
 
@@ -144,6 +157,18 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
             for p in found
         ]
 
+    @mcp.tool()
+    async def get_canvas_status() -> dict[str, Any]:
+        """Return Canvas multi-filament system state (CC2 only).
+
+        Shows connected Canvas units, each tray's filament type/name/color,
+        temperature ranges, loaded status, and the auto-refill toggle state.
+        Returns an error on CC1 (which doesn't expose Canvas over SDCP).
+        """
+        async with await _open() as printer:
+            cs = await printer.canvas_status()
+        return cs.raw
+
     if not enable_control:
         return mcp
 
@@ -162,8 +187,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         ``"local"`` (default) or ``"udisk"``. Ask the user for confirmation
         before invoking — running a print unattended is the user's risk.
         """
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.start_print(
                 filename,
                 storage=storage,
@@ -175,24 +199,21 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
     @mcp.tool()
     async def pause_print() -> dict[str, Any]:
         """DESTRUCTIVE. Pause the current print. Ask the user before invoking."""
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.pause()
         return {"ok": True, "response": result.inner}
 
     @mcp.tool()
     async def resume_print() -> dict[str, Any]:
         """Resume a paused print."""
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.resume()
         return {"ok": True, "response": result.inner}
 
     @mcp.tool()
     async def stop_print() -> dict[str, Any]:
         """DESTRUCTIVE. Stop the current print. Ask the user before invoking."""
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.stop()
         return {"ok": True, "response": result.inner}
 
@@ -205,8 +226,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         (``50``, ``100``, ``130``, ``160``). Arbitrary intermediate
         values are rejected by the firmware.
         """
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.set_print_speed(mode)
         return {"ok": True, "response": result.inner}
 
@@ -221,8 +241,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         ``chamber`` is the chamber/box fan. At least one of the three must
         be provided.
         """
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.set_fan_speed(model=model, auxiliary=auxiliary, chamber=chamber)
         return {"ok": True, "response": result.inner}
 
@@ -238,9 +257,19 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         nozzle 0..300, bed 0..110, chamber 0..60. Setting all heaters to
         ``0`` mid-print effectively kills the print.
         """
-        host, mid = await _resolve_target()
-        async with await Printer.connect(host, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open(enable_control=True) as printer:
             result = await printer.set_temperatures(nozzle=nozzle, bed=bed, chamber=chamber)
+        return {"ok": True, "response": result.inner}
+
+    @mcp.tool()
+    async def set_auto_refill(enabled: bool) -> dict[str, Any]:
+        """Toggle Canvas auto-refill (CC2 only).
+
+        When enabled, the Canvas automatically switches to the next spool
+        of the same filament type when the active one runs out mid-print.
+        """
+        async with await _open(enable_control=True) as printer:
+            result = await printer.set_auto_refill(enabled)
         return {"ok": True, "response": result.inner}
 
     return mcp

@@ -10,19 +10,33 @@ Six surfaces, all backed by the same async client:
 * an RTSP/H.264 bridge via MediaMTX in :mod:`pycentauri.rtsp`
 """
 
+from pycentauri.cc2 import CC2Printer
 from pycentauri.client import ControlDisabledError, Printer, PrinterError
+from pycentauri.connect import connect_auto
 from pycentauri.discovery import DiscoveredPrinter, discover
-from pycentauri.models import Attributes, PrintInfo, Status
+from pycentauri.models import (
+    Attributes,
+    CanvasStatus,
+    CanvasTray,
+    CanvasUnit,
+    PrintInfo,
+    Status,
+)
 
 __all__ = [
     "Attributes",
+    "CC2Printer",
+    "CanvasStatus",
+    "CanvasTray",
+    "CanvasUnit",
     "ControlDisabledError",
     "DiscoveredPrinter",
     "PrintInfo",
     "Printer",
     "PrinterError",
     "Status",
+    "connect_auto",
     "discover",
 ]
 
-__version__ = "0.5.1"
+__version__ = "0.6.0"

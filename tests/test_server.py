@@ -16,7 +16,19 @@ import pytest
 pytest.importorskip("fastapi")
 
 from pycentauri import server as server_module
+from pycentauri.client import Printer
 from tests.test_client import MAINBOARD, _FakePrinter
+
+
+@pytest.fixture(autouse=True)
+def _bypass_connect_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the server use Printer.connect directly, skipping port detection."""
+
+    async def _direct_connect(host, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.pop("access_code", None)
+        return await Printer.connect(host, **kwargs)
+
+    monkeypatch.setattr("pycentauri.server.connect_auto", _direct_connect)
 
 
 async def _asgi_client(app: Any) -> httpx.AsyncClient:
@@ -247,6 +259,21 @@ async def test_rtsp_unavailable_when_binaries_missing(
         assert r.status_code == 503
         assert "MediaMTX" in r.text
     await fake_ws.stop()
+
+
+async def test_canvas_unsupported_maps_to_501(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CC1 has no Canvas: GET /canvas must be 501 (so the UI stops asking),
+    reserving 504 for transient timeouts on a real CC2."""
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.get("/canvas")
+        assert r.status_code == 501
+        assert "CC1" in r.json()["detail"]
+    await server.stop()
 
 
 async def test_start_print_request_body_validation(monkeypatch: pytest.MonkeyPatch) -> None:

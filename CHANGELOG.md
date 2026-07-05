@@ -6,6 +6,130 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-07-05
+
+### Added
+- **Centauri Carbon 2 support.** The CC2 uses MQTT on port 1883
+  (instead of the CC1's WebSocket SDCP on 3030) with a JSON-RPC
+  envelope, X-Token auth, and a completely different command set
+  (1001/1002/1020–1031 vs 0/1/128–512). This release adds:
+  - `CC2Printer` — async MQTT client that subclasses `Printer`,
+    translating CC2 payloads into the same `Status` / `Attributes`
+    models so every surface (CLI, HTTP, MCP, web UI) works unchanged.
+  - `connect_auto(host, access_code=...)` — factory that detects the
+    model (probes `:1883` only — a CC1 answers with a harmless kernel
+    RST, and the CC1's real WebSocket connect doubles as its own probe)
+    and returns the right `Printer` subclass. Callers never need to
+    know which model they're talking to.
+  - `--access-code` / `PYCENTAURI_ACCESS_CODE` on every CLI command
+    and MCP launch (required for CC2, ignored for CC1).
+  - `paho-mqtt>=2.0` added to core dependencies.
+- CC2 status exposes `gcode_move.speed` — live head speed as the
+  commanded speed of the current move, in mm/min (÷60 matches the
+  printer screen's mm/s readout)
+  and `speed_mode` (integer 0–3) — fields the CC1 lacks entirely. Both
+  are preserved in `Status.raw["_cc2"]` alongside `remaining_time_sec`,
+  `filament_detected`, `external_device`, and `exception_status`.
+- CC2 methods 1028 (SET_TEMPERATURE), 1029 (SET_LIGHT), 1030
+  (SET_FAN_SPEED), 1031 (SET_PRINT_SPEED), 1023 (RESUME), and 1036
+  (PRINT_TASK_LIST) all confirmed working. 1042 (VIDEO_STREAM) and
+  1044 (GET_FILE_LIST) are non-responsive on firmware 01.03.02.51.
+- **Canvas multi-filament system integration (CC2 only):**
+  - `Printer.canvas_status()` — returns `CanvasStatus` with connected
+    units, tray list (filament name/type/color/brand/temp range/loaded
+    status), active tray, and auto-refill state. Method 2005.
+  - `Printer.set_auto_refill(enabled)` — toggles auto-refill. Method
+    2004. Gated by `enable_control`.
+  - CLI: `centauri canvas` (read) + `centauri refill --on/--off`
+    (write, requires `--enable-control`).
+  - HTTP: `GET /canvas` (always) + `POST /canvas/refill` (control-gated).
+  - MCP: `get_canvas_status` (always) + `set_auto_refill` (control-gated).
+  - `CanvasStatus`, `CanvasUnit`, `CanvasTray` model classes exported
+    from the package for typed access.
+
+### Fixed (pre-release hardening — none of these shipped in an earlier release)
+- **CC1 `status()`/`watch()` self-heal through a wedged push
+  scheduler.** Discovered live 2026-07-04 on V0.3.0-o: the firmware can
+  enter a state where `Cmd 512` subscribes are accepted but no status
+  frames are ever pushed, while the request path stays healthy — and a
+  reboot does not clear it (verified 2026-07-05). Both methods now fall
+  back to explicit `Cmd 0` status requests (documented to emit a
+  one-shot status frame) whenever a subscribe produces no push within
+  one period, instead of hanging forever. See `docs/PROTOCOL.md`
+  "Operational quirks".
+- `CC2Printer.watch()` now polls method 1002 inline whenever pushes go
+  quiet instead of silently terminating after one push period — CC2
+  `centauri watch` and the SSE stream no longer die on an idle printer.
+- MQTT responses are correlated by the client's exact `api_response`
+  topic and non-push method. Previously any client's response — or the
+  printer's own 6000/6008 broadcasts, which reuse small auto-increment
+  ids — could resolve a pending request future with the wrong payload
+  (including reporting success for a control command).
+- Registration is re-published from `_on_connect`, so paho's automatic
+  MQTT reconnect re-registers with the printer and pushes survive a
+  printer reboot without restarting `centauri server`.
+- All MQTT-callback work that touches futures, events, queues, or the
+  merged status dict is marshalled onto the asyncio loop (fixes the
+  cross-thread delta merge and late `set_result` races).
+- `GET /stream` uses a bounded connect timeout (read stays unbounded
+  for MJPEG) instead of hanging forever against a wedged camera port.
+- `GET /canvas` returns 504 for printer timeouts, reserving 501 for
+  "no Canvas on this printer"; the web UI now retries transient Canvas
+  failures instead of hiding the panel until a page reload.
+- A wrong CC2 access code now raises a clear auth error (MQTT reason
+  code / HTTP 401 hint) instead of a generic timeout or raw traceback.
+- `connect_auto()` and `centauri rtsp` no longer probe :3030 — the CC1
+  WebSocket connect doubles as the probe, avoiding the connect/close
+  churn that port is sensitive to. `centauri rtsp` and the HTTP server
+  both pick the right MJPEG port (CC1 :3031 / CC2 :8080) automatically,
+  including reconnects after starting with the printer offline.
+- Unknown CC2 `machine_status` values map to sentinel code 99 instead
+  of leaking raw values into the CC1 status-code space; `PrintStatus`
+  gains constants for the CC2 codes 27/28/29.
+- `CanvasStatus.from_payload` survives malformed/absent `canvas_info`
+  payloads; `CanvasUnit`/`CanvasTray` are exported from the package
+  root; `typing_extensions` declared as a direct dependency.
+- **CC2 sessions send the app-level `{"type": "PING"}` keepalive every
+  30 s.** The firmware expires a client's registration after several
+  quiet minutes and then silently stops answering that session's
+  requests — the MQTT connection stays up, responses just never come
+  (verified 2026-07-05: a dashboard went request-deaf after ~6 minutes
+  while a fresh session answered instantly). MQTT-level keepalive does
+  not prevent this; only the app-level PING does.
+- `centauri server` bounds uvicorn's graceful shutdown at 5 s. Open
+  SSE/MJPEG streams never close on their own, and without the bound a
+  stopped server lingered forever as a zombie still holding a printer
+  connection (observed 2026-06-23 and 2026-07-05).
+- CC2 lifecycle commands (start/pause/stop/resume) use a 90 s timeout —
+  the firmware answers only after the mechanical sequence completes
+  (observed 2026-07-05: a resume succeeded but its confirmation
+  arrived after the old 15 s window, surfacing a false error). When a
+  confirmation still doesn't arrive, `POST /print/*` returns 504
+  ("sent, unconfirmed — check printer status") instead of 502, and the
+  web UI shows it as a warning rather than a failure.
+
+### Tests
+- New `tests/test_cc2_mapping.py`: pure dict-in/dict-out coverage of
+  the CC2→CC1 translation layer — machine_status/sub_status mapping
+  (including purge-zone filament-switch detection and its progress
+  guard), partial-delta deep merge, full 1002 payload round-trip, and
+  Canvas parsing. Plus a server test pinning `GET /canvas` → 501 on
+  CC1.
+
+### Documentation
+- `docs/PROTOCOL.md` gains a full CC2 section: MQTT transport, topic
+  structure, connection/registration dance, the confirmed method table
+  (12 probed, 10 working), error codes, the complete status payload,
+  and a CC1-vs-CC2 comparison table. Probed on 2026-06-30 through
+  2026-07-04 against firmware 01.03.02.51 (Canvas methods 2004/2005
+  verified live with a 4-slot Canvas attached; CC2 webcam confirmed
+  unauthenticated MJPEG on :8080).
+- `docs/ARCHITECTURE.md` rewritten for the two-transport reality:
+  module map with `cc2`/`connect`, per-model ports, CC1-vs-CC2
+  `/status` and SSE flow differences, and an honest test-architecture
+  section (no automated live suite exists; live verification is manual
+  CLI runs).
+
 ## [0.5.1] - 2026-06-17
 
 ### Added

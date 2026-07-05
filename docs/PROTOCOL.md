@@ -54,8 +54,9 @@ indistinguishable at the SDCP layer.
 | 3030 | WS   | SDCP control: `ws://<ip>:3030/websocket` |
 | 3031 | HTTP | MJPEG webcam: `multipart/x-mixed-replace` at `/video` |
 
-CC2 uses different ports and a JSON-RPC discovery probe. This doc is
-CC-only.
+The CC2 uses an entirely different transport (MQTT) and has no
+broadcast discovery at all — see the **Centauri Carbon 2 protocol
+notes** section at the bottom of this document.
 
 ## Discovery
 
@@ -116,7 +117,9 @@ The printer's responses arrive on three topics:
    until polled. Don't depend on this push.
 3. Send `Cmd 512` with `{"TimePeriod": <ms>}` to subscribe to status
    pushes at the requested rate.
-4. The printer starts pushing `Status` frames at that rate.
+4. The printer starts pushing `Status` frames at that rate — **on some
+   firmware states it never does** (see "Operational quirks": periodic
+   pushes can be permanently dead while `Cmd 0` one-shots still work).
 
 `pycentauri.client.Printer` accepts `mainboard_id=` so it can skip the
 implicit Attributes wait — important because the alternative is
@@ -137,7 +140,7 @@ actually accepts. We have probed and confirmed which work.
 | 129 | `PAUSE_PRINT`           | `{}` | `Ack=0` |
 | 130 | `STOP_PRINT`            | `{}` | `Ack=0` |
 | 131 | `RESUME_PRINT`          | `{}` | `Ack=0` |
-| 324 | `GET_CANVAS_STATUS`     | `{}` | enabled in SDK; not yet exercised by pycentauri |
+| 324 | `GET_CANVAS_STATUS`     | `{}` | **unprobed** — enabled in the SDK's dispatch table but never exercised against real CC1 firmware. pycentauri implements Canvas on CC2 only (methods 2004/2005). |
 | 403 | `CHANGE_PRINT_PARAMS` (speed) | `{"PrintSpeedPct": <int>}` | `Ack=0`; `Status.PrintInfo.PrintSpeedPct` updates on next push |
 | 403 | `CHANGE_PRINT_PARAMS` (fans)  | `{"TargetFanSpeed": {"ModelFan": <0..100>, "BoxFan": <0..100>, "AuxiliaryFan": <0..100>}}` | `Ack=0`; fans physically respond within ~1s |
 | 403 | `CHANGE_PRINT_PARAMS` (temps) | `{"TempTargetNozzle": <°C>, "TempTargetHotbed": <°C>, "TempTargetBox": <°C>}` | `Ack=0`; heaters engage and `TempTarget*` updates on next push |
@@ -384,6 +387,26 @@ distinguish synthetic from physical taps.
   default 1 MB frame cap.
 - **Discovery probes can drop on busy LANs.** `discover()` retransmits
   the probe a few times within the timeout window.
+- **Periodic status pushes (`Cmd 512`) cannot be relied on.** Observed
+  live 2026-07-04 on V0.3.0-o: `Cmd 512` is ACKed but **no status
+  frames are ever pushed** — on any connection, new or old. Meanwhile
+  `Cmd 0` still returns `Ack=0` *and* still emits its one-shot status
+  frame on the status topic, ports 80/3031 serve normally, and prints
+  are unaffected. **A reboot does not restore pushes**: verified
+  2026-07-05 — full `reboot` over SSH, then subscribe-only tests at
+  ~1.5 and ~3 minutes post-boot still produced zero pushes while
+  `Cmd 0` behaved normally. Clients that passively wait for pushes
+  hang forever, so pycentauri sends `Cmd 0` whenever a subscribe
+  produces no push within one period (`status()` and `watch()` both do
+  this) — treat request-based polling as the primary status path on
+  this firmware. **Pushes DO flow mid-print** (verified 2026-07-05:
+  ~20 status pushes in 30 s during an active print on the same machine
+  that pushes nothing while idle) — the dead scheduler is an
+  idle-state phenomenon, and starting a print revives it. The Cmd 0
+  fallback simply stops firing once pushes resume, so clients get
+  full-rate updates during prints and ~one-per-period polling at idle.
+  Remaining open question: whether stock V1.1.46 idles the same way
+  (untested since the OpenCentauri flash).
 
 ## Camera
 
@@ -423,6 +446,13 @@ If 1–4 all pass but commands time out: stale connection slot exhaustion
 TIME_WAIT to clean up; if the SDCP server is still wedged after ~5
 minutes, power-cycling is the fastest reset.
 
+If 1–4 all pass and *requests* work (`Cmd 0` gets `Ack=0`) but no
+status **pushes** ever arrive after a `Cmd 512` subscribe: that's the
+dead push scheduler (see "Operational quirks" above). pycentauri
+≥ 0.6.0 rides through it automatically by requesting status frames with
+`Cmd 0`; older versions hang in `status()`/`watch()` with no known
+remedy — a reboot does **not** bring pushes back (verified 2026-07-05).
+
 ---
 
 # Centauri Carbon 2 (CC2) protocol notes
@@ -438,9 +468,10 @@ SDK's `elegoo_fdm_cc2_*` adapter source.
 |---|---|---|
 | 80 | HTTP (Angular SPA + REST) | Same concept as CC1's SPA; also serves `/system/info` for serial number bootstrap |
 | 1883 | **MQTT 3.1.1** | Primary control and telemetry transport. Replaces CC1's WebSocket SDCP. |
-| 22 | SSH (OpenSSH) | Open by default on stock firmware (unlike CC1, which needs OpenCentauri) |
+| 8080 | **MJPEG webcam** | `multipart/x-mixed-replace; boundary=frame`. Serves the stream on **any path** — `/`, `/video`, `/stream` all work. **Unauthenticated** (no access code needed). Confirmed 2026-07-04. |
+| 22 | SSH (OpenSSH) | Open by default on stock firmware 01.03.02.51 (unlike CC1, which needs OpenCentauri). Reportedly closed in newer firmware. |
 | 3030 | — | **Not present** — no SDCP/WS at all |
-| 3031 | — | **Not present** — no MJPEG at all (camera access TBD) |
+| 3031 | — | **Not present** — the webcam moved to :8080 |
 
 ## Authentication
 
@@ -449,10 +480,12 @@ MQTT broker on the printer requires username + password:
 | Field | Value |
 |---|---|
 | Username | `elegoo` (literal, hardcoded in SDK) |
-| Password | The printer's access code / API key (shown on printer screen, e.g. `ry2CnO`) |
+| Password | The printer's access code / API key (shown on printer screen, e.g. `Ab3dEf`) |
 
-The HTTP surface uses the same access code via `X-Token` header or
-query parameter: `GET /system/info?X-Token=<code>`.
+The HTTP surface uses the same access code as an `X-Token` **query
+parameter**: `GET /system/info?X-Token=<code>`. The header form
+(`X-Token: <code>`) is rejected with 401 on firmware 01.03.02.51 —
+only the query parameter works, despite the Elegoo SDK sending both.
 
 ## MQTT topic structure
 
@@ -498,8 +531,21 @@ with auto-incrementing `id` values and arrive on both the
 `api_response` topic and the `api_status` topic.
 
 PING/PONG keepalive is separate from JSON-RPC: publish
-`{"type": "PING"}`, receive `{"type": "PONG"}`. The SDK sends these
-every ~30 seconds.
+`{"type": "PING"}`, receive `{"type": "PONG"}`. The Elegoo SDK sends
+these every ~30 seconds and **they are mandatory for long-lived
+sessions**: without them the printer expires the client's registration
+after several quiet minutes and silently stops answering that
+session's requests — the MQTT connection stays connected, requests
+publish fine, responses just never come back. (Verified 2026-07-05: a
+dashboard session went request-deaf after ~6 minutes while a fresh
+session got instant answers. An earlier draft of this doc called the
+PINGs "unnecessary" based on short-lived sessions — that was wrong.)
+pycentauri sends the PING every 30 s from `CC2Printer._ping_loop`.
+
+**Rate limiting:** three or more rapid-fire requests trip a cooldown of
+roughly five seconds during which the broker silently drops responses
+(the requests are received but never answered). Space requests ≥ 2 s
+apart. Observed 2026-07-04 on firmware 01.03.02.51.
 
 ## Method codes (CC2 firmware)
 
@@ -521,7 +567,8 @@ every ~30 seconds.
 | 1031 | `SET_PRINT_SPEED` | `{"mode": <0-3>}` | `error_code: 1010` when idle (expected — only effective mid-print) |
 | 1036 | `PRINT_TASK_LIST` | `{}` | `error_code: 0`, array of `history_task_list` with UUIDs, filenames, timestamps, status |
 | 1043 | `UPDATE_PRINTER_NAME` | (not probed — SDK has it enabled) | — |
-| 2005 | `GET_CANVAS_STATUS` | (not probed — SDK has it enabled) | — |
+| 2004 | `SET_AUTO_REFILL` | `{"auto_refill": <bool>}` | `error_code: 0`; toggle verified both directions via 2005 read-back (probed 2026-07-04) |
+| 2005 | `GET_CANVAS_STATUS` | `{}` | `error_code: 0`; `canvas_info` with `active_canvas_id`, `active_tray_id` (-1 = none), `auto_refill`, and `canvas_list[].tray_list[]` — each tray has `filament_name/type/color/code`, `brand`, `min/max_nozzle_temp`, `status` (1 = loaded), `tray_id` (probed 2026-07-04 with a 4-slot Canvas attached) |
 
 ### Not responding (probed 2026-07-03)
 
@@ -545,7 +592,12 @@ Significantly richer than CC1's SDCP status push:
 ```json
 {
   "gcode_move": {
-    "speed": 3000,          // ← Live head speed in mm/min (CC1 lacks this!)
+    "speed": 3000,          // ← Commanded speed of the current move, in
+                            //   mm/MIN (gcode F word). ÷60 gives the mm/s
+                            //   figure the printer's screen shows — verified
+                            //   against the screen 2026-07-05. Idle park
+                            //   moves report F3000/F6000, purge extrudes
+                            //   F150, travels spike to F9000+.
     "speed_mode": 1,        // 0=silent, 1=balanced, 2=sport, 3=ludicrous
     "x": 52.5, "y": 264.0, "z": 80.0,
     "extruder": 0.0
@@ -597,8 +649,11 @@ Significantly richer than CC1's SDCP status push:
 ```
 
 Key differences from CC1's status payload:
-- `gcode_move.speed` — live head velocity in mm/min (CC1 lacks this
-  entirely; the screen UI reads it from internal memory, not SDCP).
+- `gcode_move.speed` — the commanded speed of the current move, in
+  **mm/min** (the gcode F word). Divide by 60 and it matches the mm/s
+  readout on the printer's own screen (verified side-by-side
+  2026-07-05). It changes per move, so travels briefly spike it above
+  print speeds. (CC1 exposes no speed field at all.)
 - `gcode_move.speed_mode` — integer 0–3 directly (CC1 only reports
   `PrintSpeedPct` from which the mode must be inferred).
 - Five named fan channels instead of three.
@@ -616,7 +671,7 @@ Key differences from CC1's status payload:
 | Cmd code range | 0–512 | 1001–2005+ |
 | Envelope | SDCP v3 (`Id`, `Topic`, `Data.Cmd`) | JSON-RPC (`id`, `method`, `params`) |
 | Status push | Cmd 512 subscribe → auto-push | Register → method 6000/6008 pushes |
-| Live head speed | Not exposed | `gcode_move.speed` |
+| Live head speed | Not exposed | `gcode_move.speed` (mm/min; ÷60 = screen's mm/s) |
 | Fan channels | 3 (model, aux, box) | 5 (+controller, +heater) |
 | SSH | OpenCentauri only | Stock |
 | Probing risk | **Crashes `app` daemon** | Graceful error_code responses |

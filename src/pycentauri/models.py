@@ -214,6 +214,87 @@ class PrintStatus:
     UNLOADING = 24
     UNLOADING_ABNORMAL = 25
     UNLOADING_PAUSED = 26
+    # pycentauri extensions for CC2 Canvas operations (no CC1 equivalent)
+    FILAMENT_SWITCHING = 27
+    FILAMENT_LOAD_COMPLETE = 28
+    FILAMENT_UNLOADING = 29
+
+
+class CanvasTray(BaseModel):
+    """A single filament slot in a Canvas multi-material unit."""
+
+    model_config = ConfigDict(extra="allow")
+
+    tray_id: int = 0
+    filament_name: str = ""
+    filament_type: str = ""
+    filament_color: str = ""
+    filament_code: str = ""
+    brand: str = ""
+    min_nozzle_temp: int = 0
+    max_nozzle_temp: int = 0
+    status: int = 0  # 1 = loaded/ready, 0 = empty/absent
+
+
+class CanvasUnit(BaseModel):
+    """A single Canvas multi-material unit (supports daisy-chaining)."""
+
+    model_config = ConfigDict(extra="allow")
+
+    canvas_id: int = 0
+    connected: int = 0
+    tray_list: list[CanvasTray] = Field(default_factory=list)
+
+
+class CanvasStatus(BaseModel):
+    """Full Canvas multi-filament system state."""
+
+    model_config = ConfigDict(extra="allow")
+
+    raw: dict[str, Any]
+    active_canvas_id: int = 0
+    active_tray_id: int = -1
+    auto_refill: bool = False
+    canvas_list: list[CanvasUnit] = Field(default_factory=list)
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> CanvasStatus:
+        ci = payload.get("canvas_info", payload)
+        if not isinstance(ci, dict):
+            ci = {}
+        units: list[CanvasUnit] = []
+        raw_list = ci.get("canvas_list")
+        for raw_unit in raw_list if isinstance(raw_list, list) else []:
+            if not isinstance(raw_unit, dict):
+                continue
+            raw_trays = raw_unit.get("tray_list")
+            trays = [
+                CanvasTray.model_validate(t)
+                for t in (raw_trays if isinstance(raw_trays, list) else [])
+                if isinstance(t, dict)
+            ]
+            units.append(
+                CanvasUnit(
+                    canvas_id=raw_unit.get("canvas_id", 0),
+                    connected=raw_unit.get("connected", 0),
+                    tray_list=trays,
+                )
+            )
+        return cls(
+            raw=payload,
+            active_canvas_id=ci.get("active_canvas_id", 0),
+            active_tray_id=ci.get("active_tray_id", -1),
+            auto_refill=ci.get("auto_refill", False),
+            canvas_list=units,
+        )
+
+    @property
+    def connected(self) -> bool:
+        return any(u.connected == 1 for u in self.canvas_list)
+
+    @property
+    def tray_count(self) -> int:
+        return sum(len(u.tray_list) for u in self.canvas_list)
 
 
 class Attributes(BaseModel):

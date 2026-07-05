@@ -4,21 +4,22 @@
 modules, the request flows, and the lifetime of every connection.
 
 ```
-                                            ┌──────────────────────────┐
-   ┌── library users (import) ──┐           │     printer at LAN IP    │
-   │                            │           │  ┌────────────────────┐  │
-   │  centauri  (CLI)  ─────────┼───────┐   │  │ port 80   web UI   │  │
-   │                            │       │   │  │ port 3030 SDCP WS  │  │
-   │  python -m pycentauri.mcp  ├───────┤   │  │ port 3031 MJPEG    │  │
-   │  (MCP stdio)               │       │   │  │ port 3000 UDP disc │  │
-   │                            │   ┌───▼───▼──┴────────────┐       │  │
-   │  centauri server  ─────────┤   │  pycentauri.client    │  ─────┘  │
-   │  ├─ /api/* (REST/SSE)      │   │  (async WS, RtspGate) │
-   │  ├─ /ui/   (static)        │   └───────────────────────┘
-   │  └─ /api/rtsp/* ───────────┤              │
-   │                            │              │  ffmpeg + MediaMTX
-   │  centauri rtsp  ──────────┐│              │  (subprocess; OS bins)
-   └────────────────────────────┘              │
+                                        ┌─────────────────────────────────┐
+   ┌── library users (import) ──┐       │        printer at LAN IP        │
+   │                            │       │  CC1:              CC2:         │
+   │  centauri  (CLI)  ─────────┼───┐   │  ┌──────────────┐ ┌───────────┐ │
+   │                            │   │   │  │ 80   web UI  │ │ 80  HTTP  │ │
+   │  python -m pycentauri.mcp  ├───┤   │  │ 3030 SDCP WS │ │ 1883 MQTT │ │
+   │  (MCP stdio)               │   │   │  │ 3031 MJPEG   │ │ 8080 MJPEG│ │
+   │                            │   │   │  │ 3000 UDP disc│ └───────────┘ │
+   │  centauri server  ─────────┤   │   │  └──────────────┘               │
+   │  ├─ /api/* (REST/SSE)      │   ▼   └──────▲──────────────▲───────────┘
+   │  ├─ /ui/   (static)        │ connect_auto─┴──────────────┘
+   │  └─ /api/rtsp/* ───────────┤   ├─ :1883 open → cc2.CC2Printer (MQTT)  CC2
+   │                            │   └─ else       → client.Printer (WS)    CC1
+   │  centauri rtsp  ──────────┐│              │
+   └────────────────────────────┘              │  ffmpeg + MediaMTX
+                                               │  (subprocess; OS bins)
                                                ▼
                                     rtsp://host:8554/printer
 ```
@@ -27,15 +28,17 @@ modules, the request flows, and the lifetime of every connection.
 
 | Module | Owns | Touches the printer? |
 |---|---|---|
-| `sdcp` | Wire envelope: `build_request`, `parse_message`, `Cmd` enum | No (pure transform) |
-| `discovery` | UDP `M99999` broadcast + JSON parse | Yes (UDP only) |
-| `camera` | MJPEG frame grabber (HTTP single-shot) | Yes (HTTP) |
-| `client` | `Printer` async WS client; reader task; request/response correlation; control gate | Yes (WS) |
-| `models` | `Status`, `Attributes`, `PrintInfo`, `PrintStatus` codes | No |
-| `cli` | Typer subcommands; auto-discovery + mainboard pre-seed | Indirect |
-| `server` | FastAPI app, `PrinterManager` (long-lived WS), `RtspController`, `/stream` proxy, web UI mount | Yes (one WS) |
+| `sdcp` | CC1 wire envelope: `build_request`, `parse_message`, `Cmd` enum | No (pure transform) |
+| `discovery` | UDP `M99999` broadcast + JSON parse (finds CC1s only) | Yes (UDP only) |
+| `camera` | MJPEG frame grabber; `CAMERA_PORT` (CC1 :3031) / `CAMERA_PORT_CC2` (:8080) | Yes (HTTP) |
+| `client` | `Printer` — CC1 async WS client; reader task; request/response correlation; control gate; base API both models share | Yes (WS) |
+| `cc2` | `CC2Printer(Printer)` — MQTT transport, JSON-RPC envelope, CC2→CC1 payload translation, Canvas | Yes (MQTT + HTTP bootstrap) |
+| `connect` | `connect_auto()` — probes :1883 (CC2), else connects CC1 WS directly (no throwaway :3030 probe) | Yes (TCP probe) |
+| `models` | `Status`, `Attributes`, `PrintInfo`, `CanvasStatus`, `PrintStatus` codes | No |
+| `cli` | Typer subcommands; auto-discovery + mainboard pre-seed; `--access-code` plumbing | Indirect |
+| `server` | FastAPI app, `PrinterManager` (long-lived connection), `RtspController`, `/stream` proxy, web UI mount | Yes (one connection) |
 | `rtsp` | MediaMTX config render + subprocess management | No (manages subprocess that does) |
-| `mcp.server` | FastMCP tools | Indirect (one WS per call) |
+| `mcp.server` | FastMCP tools | Indirect (one connection per call) |
 | `web/` | Static HTML/CSS/JS dashboard | Through the server's REST/SSE |
 
 `models` and `sdcp` are the only modules that have no I/O — everything
@@ -43,15 +46,15 @@ else is built on top of them.
 
 ## Connection lifetime by entrypoint
 
-| Entrypoint | WS strategy |
+| Entrypoint | Connection strategy |
 |---|---|
-| `centauri <subcommand>` | One WS per invocation: open → discover → command → close |
-| `python -m pycentauri.mcp` (a tool call) | One WS per tool invocation. Cached `PYCENTAURI_MAINBOARD_ID` env between calls in the same process |
-| `centauri server` | **One** long-lived WS held by `PrinterManager` for the app's lifetime. Auto-reconnects with exponential backoff (1 s → 30 s) |
-| `centauri rtsp` | Zero direct WS to the printer. Reads MJPEG over HTTP via the MediaMTX→ffmpeg pipeline |
+| `centauri <subcommand>` | One connection per invocation: probe → open → command → close (WS for CC1, MQTT session for CC2) |
+| `python -m pycentauri.mcp` (a tool call) | One connection per tool invocation. Cached `PYCENTAURI_MAINBOARD_ID` env between calls in the same process |
+| `centauri server` | **One** long-lived connection held by `PrinterManager` for the app's lifetime. Auto-reconnects with exponential backoff (1 s → 30 s); on CC2, paho's own reconnect also re-registers with the printer from `_on_connect` |
+| `centauri rtsp` | Zero control connection to the printer. Reads MJPEG over HTTP via the MediaMTX→ffmpeg pipeline (camera port picked by probing :1883 only — :3030 is never touched) |
 
-The 5-slot firmware limit is the reason the server holds one persistent
-connection rather than reconnecting per request.
+The CC1's 5-slot firmware limit is the reason the server holds one
+persistent connection rather than reconnecting per request.
 
 ## Request flow: `GET /status` (server)
 
@@ -70,9 +73,16 @@ FastAPI route ── PrinterManager.printer ──► Printer.status()
                                               JSON body
 ```
 
-`status()` returns immediately if a push has already arrived (the reader
-populates `_latest_status` continuously). Otherwise it triggers a fresh
-subscribe (`Cmd 512`) and waits for the next push.
+On **CC1**, `status()` returns immediately if a push has already arrived
+(the reader populates `_latest_status` continuously); otherwise it
+triggers a fresh subscribe (`Cmd 512`) and waits for the next push.
+
+On **CC2**, `status()` round-trips a method-1002 request every call —
+there is no subscribe-and-cache shortcut. The result also refreshes the
+baseline that method-6000 partial deltas are merged into. Callers that
+poll `/status` frequently (the web UI polls at 2 s while printing)
+should know each poll is a real MQTT request; the CC2's rate limiter
+tolerates this cadence but not much more.
 
 ## Request flow: SSE `/events/status`
 
@@ -139,13 +149,16 @@ served via `StaticFiles(directory=resource_files("pycentauri") /
 `tests/test_client.py` defines `_FakePrinter` — an in-process
 `websockets.asyncio.server` that speaks just enough SDCP to exercise the
 real client (Attributes push on connect, Cmd 512 → status pushes,
-Cmd 129/131/etc → ack). All other test files build on it via
-monkey-patched `WS_PORT`.
+Cmd 129/131/etc → ack). The server tests build on it via monkey-patched
+`WS_PORT` and a fixture that bypasses `connect_auto`'s port probing.
+`tests/test_cc2_mapping.py` covers the CC2→CC1 translation layer
+(state mapping, delta merge, Canvas parsing) as pure dict-in/dict-out
+functions — no MQTT infrastructure.
 
-There are **no** live-printer requirements in CI. The optional live
-suite under `tests/integration/` runs only when `PYCENTAURI_TEST_HOST`
-is set and is intentionally excluded from the default `pytest`
-collection in CI.
+There are **no** live-printer requirements in CI, and no automated live
+suite exists yet — the CC2 MQTT transport itself is currently verified
+manually with the CLI against real hardware (`centauri status`,
+`centauri canvas`, a fan write) after changes.
 
 ## Surface dependency matrix
 

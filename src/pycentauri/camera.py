@@ -11,6 +11,7 @@ from __future__ import annotations
 import httpx
 
 CAMERA_PORT = 3031
+CAMERA_PORT_CC2 = 8080
 CAMERA_PATH = "/video"
 SOI = b"\xff\xd8"
 EOI = b"\xff\xd9"

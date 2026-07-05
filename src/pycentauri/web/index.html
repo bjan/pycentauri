@@ -4,28 +4,22 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0b0b0d">
-  <title>pycentauri · console</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&display=swap">
+  <title>pycentauri</title>
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0b0d'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ffb347'/%3E%3Ccircle cx='16' cy='16' r='10' fill='none' stroke='%23ffb347' stroke-width='1.5' stroke-dasharray='2 3'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%230b0b0d'/%3E%3Ccircle cx='16' cy='16' r='6' fill='%23ffb347'/%3E%3C/svg%3E">
 </head>
 <body>
-  <div class="bg-grid"  aria-hidden="true"></div>
-  <div class="bg-noise" aria-hidden="true"></div>
 
-  <!-- Upper rail -->
   <nav class="rail rail-top">
     <div class="rail-group">
-      <span class="logo">◉ PYCENTAURI</span>
+      <span class="logo">pycentauri</span>
       <span class="rail-sep">/</span>
-      <span class="rail-ver">v<span id="version">—</span></span>
+      <span class="rail-ver">v<span id="version">-</span></span>
     </div>
     <div class="rail-group">
-      <span class="rail-dim" id="printer-name">—</span>
-      <span class="rail-sep">·</span>
-      <span class="rail-dim"><span id="firmware">—</span></span>
+      <span class="rail-dim" id="printer-name">-</span>
+      <span class="rail-sep">/</span>
+      <span class="rail-dim"><span id="firmware">-</span></span>
       <span class="status-pill" id="status-pill">
         <span class="status-dot"></span>
         <span id="status-text">LINK</span>
@@ -34,274 +28,203 @@
   </nav>
 
   <main class="console">
-    <!-- LEFT column — viewport + progress + controls -->
     <section class="viewport-col">
 
-      <!-- Webcam viewport hero -->
       <div class="viewport" role="img" aria-label="Live webcam feed">
         <img id="webcam" src="/stream" alt="">
-        <div class="viewport-corners" aria-hidden="true">
-          <span class="corner tl"></span>
-          <span class="corner tr"></span>
-          <span class="corner bl"></span>
-          <span class="corner br"></span>
-        </div>
-        <div class="viewport-crosshair" aria-hidden="true">
-          <span class="ch ch-h"></span>
-          <span class="ch ch-v"></span>
-          <span class="ch-dot"></span>
-        </div>
-        <div class="viewport-scanline" aria-hidden="true"></div>
-        <div class="viewport-overlay top">
-          <span class="ovl">CAM/01</span>
-          <span class="ovl ovl-rec"><span class="rec-dot"></span>LIVE</span>
-        </div>
         <div class="viewport-overlay bot">
-          <span class="ovl">MJPEG · :3031</span>
-          <a class="snap-btn" href="/snapshot" download="snapshot.jpg">DL · JPG</a>
+          <a class="snap-btn" href="/snapshot" download="snapshot.jpg">Save snapshot</a>
         </div>
       </div>
 
-      <!-- Job progress strip -->
       <div class="panel job-panel">
-        <header class="panel-header">
-          <span class="panel-tag">JOB</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx">02</span>
-        </header>
-        <div class="job-name" id="filename">— · AWAITING ·</div>
-        <div class="job-track">
-          <div class="ruler" aria-hidden="true"></div>
-          <div class="bar">
-            <div class="bar-fill" id="progress-bar"></div>
-            <div class="bar-label">
-              <span id="progress-label">0%</span>
-            </div>
-          </div>
-          <div class="ruler" aria-hidden="true"></div>
+        <header class="panel-header"><span class="panel-tag">Job</span></header>
+        <div class="job-name" id="filename">Idle</div>
+        <div class="bar">
+          <div class="bar-fill" id="progress-bar"></div>
+          <div class="bar-label"><span id="progress-label">0%</span></div>
         </div>
         <dl class="job-stats">
-          <div><dt>LAYER</dt><dd id="layer">—</dd></div>
-          <div><dt>ELAPSED</dt><dd id="elapsed">—</dd></div>
-          <div><dt>ETA</dt><dd id="remaining">—</dd></div>
-          <div><dt>SPEED</dt><dd id="speed">—</dd></div>
+          <div><dt>Layer</dt><dd id="layer">-</dd></div>
+          <div><dt>Elapsed</dt><dd id="elapsed">-</dd></div>
+          <div><dt>ETA</dt><dd id="remaining">-</dd></div>
+          <div><dt>Speed</dt><dd id="speed">-</dd></div>
         </dl>
       </div>
 
-      <!-- Exec / control -->
       <div class="panel controls" id="controls" hidden>
-        <header class="panel-header">
-          <span class="panel-tag">EXEC</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx">03</span>
-        </header>
+        <header class="panel-header"><span class="panel-tag">Controls</span></header>
         <div class="btn-grid">
-          <button id="btn-pause" class="kbd-btn warn" type="button">
-            <span class="kbd-key">F1</span>
-            <span class="kbd-label">PAUSE</span>
-          </button>
-          <button id="btn-resume" class="kbd-btn ok" type="button">
-            <span class="kbd-key">F2</span>
-            <span class="kbd-label">RESUME</span>
-          </button>
-          <button id="btn-stop" class="kbd-btn danger" type="button">
-            <span class="kbd-key">F3</span>
-            <span class="kbd-label">STOP</span>
-          </button>
+          <button id="btn-pause" class="btn warn" type="button">Pause</button>
+          <button id="btn-resume" class="btn ok" type="button">Resume</button>
+          <button id="btn-stop" class="btn danger" type="button">Stop</button>
         </div>
         <div class="ctrl-msg" id="ctrl-msg" aria-live="polite"></div>
       </div>
 
-      <!-- Live-adjust panel (Cmd 403 family) -->
       <div class="panel adjust" id="adjust" hidden>
-        <header class="panel-header">
-          <span class="panel-tag">ADJUST</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx">07</span>
-        </header>
+        <header class="panel-header"><span class="panel-tag">Adjust</span></header>
 
-        <div class="adj-sub">SPEED MODE · ACTIVE PRINT ONLY</div>
+        <div class="adj-sub">Speed mode</div>
         <div class="adj-modes" id="adj-speed-modes">
-          <button class="kbd-btn adj-mode" data-mode="silent"    type="button">
-            <span class="kbd-key">50%</span><span class="kbd-label">SILENT</span>
+          <button class="btn adj-mode" data-mode="silent" type="button">
+            <small>50%</small> Silent
           </button>
-          <button class="kbd-btn adj-mode" data-mode="balanced"  type="button">
-            <span class="kbd-key">100%</span><span class="kbd-label">BALANCED</span>
+          <button class="btn adj-mode" data-mode="balanced" type="button">
+            <small>100%</small> Balanced
           </button>
-          <button class="kbd-btn adj-mode" data-mode="sport"     type="button">
-            <span class="kbd-key">130%</span><span class="kbd-label">SPORT</span>
+          <button class="btn adj-mode" data-mode="sport" type="button">
+            <small>130%</small> Sport
           </button>
-          <button class="kbd-btn adj-mode" data-mode="ludicrous" type="button">
-            <span class="kbd-key">160%</span><span class="kbd-label">LUDICROUS</span>
+          <button class="btn adj-mode" data-mode="ludicrous" type="button">
+            <small>160%</small> Ludicrous
           </button>
         </div>
 
-        <div class="adj-sub">FANS · 0–100%</div>
+        <div class="adj-sub">Fans</div>
         <div class="adj-row">
-          <label class="adj-lbl" for="adj-fan-model">MODEL</label>
+          <label class="adj-lbl" for="adj-fan-model">Model</label>
           <input type="range" id="adj-fan-model-slider" min="0" max="100" step="1" value="0">
           <input type="number" id="adj-fan-model" min="0" max="100" step="1" value="0">
-          <button class="kbd-btn adj-apply" data-target="fan-model" type="button">
-            <span class="kbd-label">APPLY</span>
-          </button>
+          <button class="btn adj-apply" data-target="fan-model" type="button">Set</button>
         </div>
         <div class="adj-row">
-          <label class="adj-lbl" for="adj-fan-aux">AUX</label>
+          <label class="adj-lbl" for="adj-fan-aux">Aux</label>
           <input type="range" id="adj-fan-aux-slider" min="0" max="100" step="1" value="0">
           <input type="number" id="adj-fan-aux" min="0" max="100" step="1" value="0">
-          <button class="kbd-btn adj-apply" data-target="fan-aux" type="button">
-            <span class="kbd-label">APPLY</span>
-          </button>
+          <button class="btn adj-apply" data-target="fan-aux" type="button">Set</button>
         </div>
         <div class="adj-row">
-          <label class="adj-lbl" for="adj-fan-chamber">CHAMBER</label>
+          <label class="adj-lbl" for="adj-fan-chamber">Chamber</label>
           <input type="range" id="adj-fan-chamber-slider" min="0" max="100" step="1" value="0">
           <input type="number" id="adj-fan-chamber" min="0" max="100" step="1" value="0">
-          <button class="kbd-btn adj-apply" data-target="fan-chamber" type="button">
-            <span class="kbd-label">APPLY</span>
-          </button>
+          <button class="btn adj-apply" data-target="fan-chamber" type="button">Set</button>
         </div>
 
-        <div class="adj-sub">HEATERS · 0 = OFF</div>
+        <div class="adj-sub">Heaters</div>
         <div class="adj-row">
-          <label class="adj-lbl" for="adj-temp-nozzle">NOZZLE <span class="adj-unit">°C</span></label>
+          <label class="adj-lbl" for="adj-temp-nozzle">Nozzle</label>
           <input type="range" id="adj-temp-nozzle-slider" min="0" max="300" step="5" value="0">
           <input type="number" id="adj-temp-nozzle" min="0" max="300" step="1" value="0">
-          <button class="kbd-btn adj-apply" data-target="temp-nozzle" type="button">
-            <span class="kbd-label">APPLY</span>
-          </button>
+          <button class="btn adj-apply" data-target="temp-nozzle" type="button">Set</button>
         </div>
         <div class="adj-row">
-          <label class="adj-lbl" for="adj-temp-bed">BED <span class="adj-unit">°C</span></label>
+          <label class="adj-lbl" for="adj-temp-bed">Bed</label>
           <input type="range" id="adj-temp-bed-slider" min="0" max="110" step="5" value="0">
           <input type="number" id="adj-temp-bed" min="0" max="110" step="1" value="0">
-          <button class="kbd-btn adj-apply" data-target="temp-bed" type="button">
-            <span class="kbd-label">APPLY</span>
-          </button>
+          <button class="btn adj-apply" data-target="temp-bed" type="button">Set</button>
         </div>
         <div class="adj-row">
-          <label class="adj-lbl" for="adj-temp-chamber">CHAMBER <span class="adj-unit">°C</span></label>
+          <label class="adj-lbl" for="adj-temp-chamber">Chamber</label>
           <input type="range" id="adj-temp-chamber-slider" min="0" max="60" step="1" value="0">
           <input type="number" id="adj-temp-chamber" min="0" max="60" step="1" value="0">
-          <button class="kbd-btn adj-apply" data-target="temp-chamber" type="button">
-            <span class="kbd-label">APPLY</span>
-          </button>
+          <button class="btn adj-apply" data-target="temp-chamber" type="button">Set</button>
         </div>
 
         <div class="ctrl-msg" id="adj-msg" aria-live="polite"></div>
       </div>
     </section>
 
-    <!-- RIGHT column — instruments -->
     <aside class="instruments-col">
 
-      <!-- State -->
       <div class="panel state-panel">
-        <header class="panel-header">
-          <span class="panel-tag">STATE</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx">01</span>
-        </header>
+        <header class="panel-header"><span class="panel-tag">State</span></header>
         <div class="state-row">
           <span class="state-code" id="print-status-code">--</span>
           <span class="state-word" id="print-status">IDLE</span>
         </div>
       </div>
 
-      <!-- Thermals -->
       <div class="panel thermal-panel">
-        <header class="panel-header">
-          <span class="panel-tag">THERMAL</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx">04</span>
-        </header>
+        <header class="panel-header"><span class="panel-tag">Thermal</span></header>
         <div class="gauges">
           <div class="gauge" data-id="nozzle">
             <div class="gauge-head">
-              <span class="gauge-label">NZL</span>
-              <span class="gauge-ref">T-01</span>
+              <span class="gauge-label">Nozzle</span>
             </div>
             <div class="gauge-val"><span id="t-nozzle">---.-</span><span class="unit">°C</span></div>
-            <div class="gauge-target">SETPOINT · <span id="t-nozzle-target">---</span>°</div>
+            <div class="gauge-target">Target <span id="t-nozzle-target">---</span>°</div>
             <div class="gauge-bar"><div class="gauge-fill" id="t-nozzle-bar"></div></div>
           </div>
           <div class="gauge" data-id="bed">
             <div class="gauge-head">
-              <span class="gauge-label">BED</span>
-              <span class="gauge-ref">T-02</span>
+              <span class="gauge-label">Bed</span>
             </div>
             <div class="gauge-val"><span id="t-bed">---.-</span><span class="unit">°C</span></div>
-            <div class="gauge-target">SETPOINT · <span id="t-bed-target">---</span>°</div>
+            <div class="gauge-target">Target <span id="t-bed-target">---</span>°</div>
             <div class="gauge-bar"><div class="gauge-fill" id="t-bed-bar"></div></div>
           </div>
           <div class="gauge" data-id="chamber">
             <div class="gauge-head">
-              <span class="gauge-label">BOX</span>
-              <span class="gauge-ref">T-03</span>
+              <span class="gauge-label">Chamber</span>
             </div>
             <div class="gauge-val"><span id="t-chamber">---.-</span><span class="unit">°C</span></div>
-            <div class="gauge-target">AMBIENT · <span id="t-chamber-target">---</span>°</div>
+            <div class="gauge-target">Ambient <span id="t-chamber-target">---</span>°</div>
             <div class="gauge-bar"><div class="gauge-fill" id="t-chamber-bar"></div></div>
           </div>
         </div>
       </div>
 
-      <!-- RTSP stream control -->
       <div class="panel rtsp-panel" id="rtsp-panel" hidden>
-        <header class="panel-header">
-          <span class="panel-tag">STREAM</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx" id="rtsp-state-idx">06</span>
-        </header>
+        <header class="panel-header"><span class="panel-tag">Stream</span></header>
         <div class="rtsp-row">
-          <span class="rtsp-state" id="rtsp-state">—</span>
-          <button id="btn-rtsp-toggle" class="kbd-btn rtsp-toggle" type="button" disabled>
-            <span class="kbd-label" id="btn-rtsp-label">—</span>
+          <span class="rtsp-state" id="rtsp-state">-</span>
+          <button id="btn-rtsp-toggle" class="btn rtsp-toggle" type="button" disabled>
+            <span id="btn-rtsp-label">-</span>
           </button>
         </div>
         <div class="rtsp-url-wrap">
-          <code class="rtsp-url" id="rtsp-url">rtsp://—</code>
-          <button id="btn-rtsp-copy" class="copy-btn" type="button" title="Copy URL">COPY</button>
+          <code class="rtsp-url" id="rtsp-url">rtsp://-</code>
+          <button id="btn-rtsp-copy" class="copy-btn" type="button" title="Copy URL">Copy</button>
         </div>
         <div class="rtsp-meta" id="rtsp-meta"></div>
         <div class="rtsp-msg" id="rtsp-msg" aria-live="polite"></div>
       </div>
 
-      <!-- Kinematics + fans -->
       <div class="panel tele-panel">
-        <header class="panel-header">
-          <span class="panel-tag">KINEMATICS</span>
-          <span class="panel-rule"></span>
-          <span class="panel-idx">05</span>
-        </header>
+        <header class="panel-header"><span class="panel-tag">Kinematics</span></header>
         <div class="coords">
           <div class="axis"><span class="axis-lbl">X</span><span class="axis-val" id="pos-x">---.--</span></div>
           <div class="axis"><span class="axis-lbl">Y</span><span class="axis-val" id="pos-y">---.--</span></div>
           <div class="axis"><span class="axis-lbl">Z</span><span class="axis-val" id="pos-z">---.--</span></div>
         </div>
         <dl class="tele-dl">
-          <div><dt>Z · OFFSET</dt><dd id="z-offset">—</dd></div>
-          <div><dt>FAN · MODEL</dt><dd id="fan-model">—</dd></div>
-          <div><dt>FAN · AUX</dt><dd id="fan-aux">—</dd></div>
-          <div><dt>FAN · CHAMBER</dt><dd id="fan-box">—</dd></div>
-          <div><dt>MAINBOARD</dt><dd class="mono-xs" id="mainboard">—</dd></div>
+          <div id="head-speed-row" hidden title="Commanded speed of the current gcode move (matches the printer screen's readout). Briefly spikes on travel moves."><dt>Head speed</dt><dd id="head-speed">-</dd></div>
+          <div><dt>Z offset</dt><dd id="z-offset">-</dd></div>
+          <div><dt>Fan model</dt><dd id="fan-model">-</dd></div>
+          <div><dt>Fan aux</dt><dd id="fan-aux">-</dd></div>
+          <div><dt>Fan chamber</dt><dd id="fan-box">-</dd></div>
+          <div id="fan-controller-row" hidden><dt>Fan ctrl</dt><dd id="fan-controller">-</dd></div>
+          <div id="fan-heater-row" hidden><dt>Fan heater</dt><dd id="fan-heater">-</dd></div>
+          <div><dt>Mainboard</dt><dd class="mono-xs" id="mainboard">-</dd></div>
         </dl>
+      </div>
+
+      <div class="panel canvas-panel" id="canvas-panel" hidden>
+        <header class="panel-header"><span class="panel-tag">Canvas</span></header>
+        <div class="canvas-trays" id="canvas-trays"></div>
+        <div class="canvas-meta">
+          <span class="canvas-refill-label">Auto-refill</span>
+          <span class="canvas-refill-state" id="canvas-refill-state">-</span>
+          <button class="btn canvas-refill-toggle" id="canvas-refill-toggle" type="button" hidden>
+            <span id="canvas-refill-btn-label">-</span>
+          </button>
+          <button class="btn canvas-refresh" id="canvas-refresh" type="button" title="Refresh Canvas status">Refresh</button>
+        </div>
+        <div class="ctrl-msg" id="canvas-msg" aria-live="polite"></div>
       </div>
     </aside>
   </main>
 
-  <!-- Lower rail -->
   <footer class="rail rail-bottom">
     <div class="rail-group">
-      <span class="rail-dim">HOST</span>
-      <span id="host">—</span>
+      <span class="rail-dim">Host</span>
+      <span id="host">-</span>
     </div>
     <div class="rail-group">
-      <a href="/docs">API · OPENAPI</a>
+      <a href="/docs">API docs</a>
       <span class="rail-sep">/</span>
-      <a href="/redoc">REDOC</a>
-      <span class="rail-sep">/</span>
-      <a href="https://github.com/bjan/pycentauri" target="_blank" rel="noopener">SRC</a>
+      <a href="https://github.com/bjan/pycentauri" target="_blank" rel="noopener">Source</a>
     </div>
   </footer>
 

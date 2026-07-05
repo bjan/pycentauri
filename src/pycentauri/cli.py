@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import sys
+from collections.abc import Coroutine
 from pathlib import Path
 from typing import Annotated
 
@@ -19,6 +20,7 @@ import typer
 
 from pycentauri import __version__
 from pycentauri.client import Printer
+from pycentauri.connect import connect_auto
 from pycentauri.discovery import discover as discover_printers
 
 app = typer.Typer(
@@ -46,6 +48,14 @@ ControlOpt = Annotated[
         "--enable-control",
         envvar="PYCENTAURI_ENABLE_CONTROL",
         help="Required for write actions. Off by default for safety.",
+    ),
+]
+AccessCodeOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--access-code",
+        envvar="PYCENTAURI_ACCESS_CODE",
+        help="CC2 API key / access code (required for Centauri Carbon 2).",
     ),
 ]
 JsonOpt = Annotated[bool, typer.Option("--json", help="Emit machine-readable JSON.")]
@@ -82,7 +92,23 @@ async def _resolve_target(host: str | None) -> tuple[str, str | None]:
     return found[0].host, found[0].mainboard_id
 
 
-def _run(coro: asyncio.coroutines.Coroutine[object, object, object]) -> object:  # type: ignore[name-defined]
+async def _open_printer(
+    host: str | None,
+    *,
+    enable_control: bool = False,
+    access_code: str | None = None,
+) -> Printer:
+    """Resolve host, auto-detect CC1/CC2, and return a connected Printer."""
+    h, mid = await _resolve_target(host)
+    return await connect_auto(
+        h,
+        enable_control=enable_control,
+        mainboard_id=mid,
+        access_code=access_code,
+    )
+
+
+def _run(coro: Coroutine[object, object, object]) -> object:
     return asyncio.run(coro)
 
 
@@ -136,12 +162,15 @@ def cmd_discover(
 
 
 @app.command("status")
-def cmd_status(host: HostOpt = None, as_json: JsonOpt = False) -> None:
+def cmd_status(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
     """Print the printer's current status once and exit."""
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, mainboard_id=mid) as printer:
+        async with await _open_printer(host, access_code=access_code) as printer:
             st = await printer.status()
         if as_json:
             typer.echo(json.dumps(st.raw, indent=2, default=str))
@@ -184,14 +213,14 @@ def cmd_status(host: HostOpt = None, as_json: JsonOpt = False) -> None:
 @app.command("watch")
 def cmd_watch(
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     period_ms: int = typer.Option(2000, "--period-ms", help="Push interval."),
     as_json: JsonOpt = False,
 ) -> None:
     """Stream live status updates until interrupted (Ctrl-C)."""
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, push_period_ms=period_ms, mainboard_id=mid) as printer:
+        async with await _open_printer(host, access_code=access_code) as printer:
             async for st in printer.watch():
                 if as_json:
                     typer.echo(json.dumps(st.raw, default=str))
@@ -209,12 +238,15 @@ def cmd_watch(
 
 
 @app.command("attributes")
-def cmd_attributes(host: HostOpt = None, as_json: JsonOpt = False) -> None:
+def cmd_attributes(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
     """Print the printer's attributes (model, firmware, capabilities)."""
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, mainboard_id=mid) as printer:
+        async with await _open_printer(host, access_code=access_code) as printer:
             attrs = await printer.attributes()
         if as_json:
             typer.echo(json.dumps(attrs.raw, indent=2, default=str))
@@ -233,13 +265,13 @@ def cmd_attributes(host: HostOpt = None, as_json: JsonOpt = False) -> None:
 def cmd_snapshot(
     out: Annotated[Path, typer.Argument(help="Output JPEG path, or '-' for stdout.")],
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     timeout: float = typer.Option(10.0, "--timeout", "-t"),
 ) -> None:
     """Save a JPEG snapshot from the built-in webcam."""
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, mainboard_id=mid) as printer:
+        async with await _open_printer(host, access_code=access_code) as printer:
             jpeg = await printer.snapshot(timeout=timeout)
         if str(out) == "-":
             sys.stdout.buffer.write(jpeg)
@@ -254,6 +286,7 @@ def cmd_snapshot(
 def cmd_print_start(
     filename: Annotated[str, typer.Argument(help="File name as it appears on the printer.")],
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     enable_control: ControlOpt = False,
     storage: str = typer.Option("local", "--storage", help="'local' or 'udisk'."),
     auto_leveling: bool = typer.Option(True, "--auto-level/--no-auto-level"),
@@ -265,8 +298,9 @@ def cmd_print_start(
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             result = await printer.start_print(
                 filename, storage=storage, auto_leveling=auto_leveling, timelapse=timelapse
             )
@@ -276,15 +310,20 @@ def cmd_print_start(
 
 
 @print_cmd.command("pause")
-def cmd_print_pause(host: HostOpt = None, enable_control: ControlOpt = False) -> None:
+def cmd_print_pause(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
     """Pause the current print."""
     if not enable_control:
         _echo_err("Refusing to send a write action without --enable-control.")
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             await printer.pause()
         typer.echo("paused")
 
@@ -292,15 +331,20 @@ def cmd_print_pause(host: HostOpt = None, enable_control: ControlOpt = False) ->
 
 
 @print_cmd.command("resume")
-def cmd_print_resume(host: HostOpt = None, enable_control: ControlOpt = False) -> None:
+def cmd_print_resume(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
     """Resume a paused print."""
     if not enable_control:
         _echo_err("Refusing to send a write action without --enable-control.")
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             await printer.resume()
         typer.echo("resumed")
 
@@ -308,15 +352,20 @@ def cmd_print_resume(host: HostOpt = None, enable_control: ControlOpt = False) -
 
 
 @print_cmd.command("stop")
-def cmd_print_stop(host: HostOpt = None, enable_control: ControlOpt = False) -> None:
+def cmd_print_stop(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
     """Stop the current print."""
     if not enable_control:
         _echo_err("Refusing to send a write action without --enable-control.")
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             await printer.stop()
         typer.echo("stop sent")
 
@@ -333,6 +382,7 @@ def cmd_speed(
         ),
     ],
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     enable_control: ControlOpt = False,
 ) -> None:
     """Set the print-speed mode. Only effective while a print is running."""
@@ -343,8 +393,9 @@ def cmd_speed(
     parsed: str | int = int(mode) if mode.lstrip("-").isdigit() else mode
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             try:
                 await printer.set_print_speed(parsed)
             except ValueError as err:
@@ -370,6 +421,7 @@ def cmd_fan(
         typer.Option("--chamber", help="Chamber/box fan 0..100%."),
     ] = None,
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     enable_control: ControlOpt = False,
 ) -> None:
     """Set fan speeds. Pass any subset; omitted fans are left untouched."""
@@ -381,8 +433,9 @@ def cmd_fan(
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             try:
                 await printer.set_fan_speed(model=model, auxiliary=auxiliary, chamber=chamber)
             except ValueError as err:
@@ -408,6 +461,7 @@ def cmd_temp(
         float | None, typer.Option("--chamber", help="Chamber target °C (0 = off).")
     ] = None,
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     enable_control: ControlOpt = False,
 ) -> None:
     """Set heater target temperatures. Pass any subset."""
@@ -419,8 +473,9 @@ def cmd_temp(
         raise typer.Exit(code=2)
 
     async def run() -> None:
-        h, mid = await _resolve_target(host)
-        async with await Printer.connect(h, enable_control=True, mainboard_id=mid) as printer:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
             try:
                 await printer.set_temperatures(nozzle=nozzle, bed=bed, chamber=chamber)
             except ValueError as err:
@@ -436,9 +491,62 @@ def cmd_temp(
     _run(run())
 
 
+@app.command("canvas")
+def cmd_canvas(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Show Canvas multi-filament system status (CC2 only)."""
+
+    async def run() -> None:
+        async with await _open_printer(host, access_code=access_code) as printer:
+            cs = await printer.canvas_status()
+        if as_json:
+            typer.echo(json.dumps(cs.raw, indent=2, default=str))
+        else:
+            typer.echo(f"auto_refill  : {'ON' if cs.auto_refill else 'OFF'}")
+            typer.echo(f"active_tray  : {cs.active_tray_id if cs.active_tray_id >= 0 else 'none'}")
+            typer.echo(f"connected    : {'yes' if cs.connected else 'no'}")
+            for unit in cs.canvas_list:
+                typer.echo(f"\ncanvas #{unit.canvas_id}:")
+                for t in unit.tray_list:
+                    loaded = "●" if t.status == 1 else "○"
+                    typer.echo(
+                        f"  {loaded} tray {t.tray_id}: {t.filament_name} "
+                        f"({t.filament_type}) {t.filament_color} "
+                        f"[{t.min_nozzle_temp}-{t.max_nozzle_temp}°C]"
+                    )
+
+    _run(run())
+
+
+@app.command("refill")
+def cmd_refill(
+    on: Annotated[bool, typer.Option("--on/--off", help="Enable or disable auto-refill.")] = True,
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
+    """Toggle Canvas auto-refill (CC2 only)."""
+    if not enable_control:
+        _echo_err("Refusing to send a write action without --enable-control.")
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
+            await printer.set_auto_refill(on)
+        typer.echo(f"auto-refill {'enabled' if on else 'disabled'}")
+
+    _run(run())
+
+
 @app.command("server")
 def cmd_server(
     host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
     bind: str = typer.Option(
         "127.0.0.1", "--bind", help="Interface to bind. Use 0.0.0.0 to expose on LAN."
     ),
@@ -490,6 +598,7 @@ def cmd_server(
         port=port,
         enable_control=enable_control,
         mainboard_id=mid,
+        access_code=access_code,
         log_level=log_level,
         rtsp_config=rtsp_cfg,
     )
@@ -519,15 +628,24 @@ def cmd_rtsp(
     Transcoding only happens while a client is actually connected to the
     RTSP URL, so idle cost is zero.
     """
+    from pycentauri.camera import CAMERA_PORT, CAMERA_PORT_CC2
+    from pycentauri.connect import _port_open
     from pycentauri.rtsp import RtspConfig, RtspError, run
 
-    async def resolve() -> tuple[str, str | None]:
-        return await _resolve_target(host)
+    async def resolve() -> tuple[str, str | None, int]:
+        h, mid = await _resolve_target(host)
+        # CC1 serves MJPEG on :3031, CC2 on :8080. Probing :1883 alone is
+        # conclusive (CC1 never runs MQTT) and a CC1 answers it with a
+        # harmless kernel RST — we deliberately never probe :3030, which
+        # is sensitive to connect/close churn.
+        cam = CAMERA_PORT_CC2 if await _port_open(h, 1883) else CAMERA_PORT
+        return h, mid, cam
 
-    h, _mid = asyncio.run(resolve())
+    h, _mid, cam_port = asyncio.run(resolve())
 
     cfg = RtspConfig(
         printer_host=h,
+        camera_port=cam_port,
         rtsp_port=port,
         bind=bind,
         path=stream_path,

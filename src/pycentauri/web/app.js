@@ -38,6 +38,10 @@ const PRINT_STATUS = {
   24: { label: "UNLOADING",    cls: "state-printing" },
   25: { label: "UNLOAD ERR",   cls: "state-err" },
   26: { label: "UNLOAD PAUSE", cls: "state-paused" },
+  // CC2-only codes (mapped from machine_status + sub_status in cc2.py)
+  27: { label: "SWITCHING FILAMENT", cls: "state-printing" },
+  28: { label: "FILAMENT LOADED",    cls: "state-printing" },
+  29: { label: "UNLOADING FILAMENT", cls: "state-printing" },
 };
 
 function fmtSeconds(s) {
@@ -90,6 +94,7 @@ async function loadInfo() {
     if (info.enable_control) {
       $("controls").hidden = false;
       $("adjust").hidden = false;
+      canvasControlEnabled = true;
     }
 
     try {
@@ -189,13 +194,26 @@ function renderStatus(raw) {
 
   // Fans
   const fans = raw.CurrentFanSpeed || {};
-  const setFan = (id, key) => {
+  const setFan = (id, key, rowId) => {
     const v = fans[key];
     $(id).textContent = (v != null) ? `${v}%` : "—";
+    if (rowId && v != null) $(rowId).hidden = false;
   };
   setFan("fan-model", "ModelFan");
   setFan("fan-aux",   "AuxiliaryFan");
   setFan("fan-box",   "BoxFan");
+  setFan("fan-controller", "ControllerFan", "fan-controller-row");
+  setFan("fan-heater",     "HeaterFan",     "fan-heater-row");
+
+  // CC2-only: live head speed from gcode_move.speed (mm/min)
+  const cc2 = raw._cc2;
+  if (cc2 && cc2.gcode_move_speed != null) {
+    // gcode_move.speed is the commanded speed of the current move in
+    // mm/min; ÷60 gives the mm/s figure the printer's own screen shows
+    // (verified against the screen 2026-07-05). Travels spike it briefly.
+    $("head-speed-row").hidden = false;
+    $("head-speed").textContent = `${Math.round(cc2.gcode_move_speed / 60)} mm/s`;
+  }
 
   setStatusPill("ok", "LINK OK");
 }
@@ -248,6 +266,13 @@ async function doAction(label, path, confirmMsg) {
   for (const b of btns) b.disabled = true;
   try {
     const r = await fetch(path, { method: "POST" });
+    if (r.status === 504) {
+      // Command reached the printer but confirmation didn't arrive in
+      // time (CC2 lifecycle commands respond only after the mechanical
+      // sequence finishes). Almost always the action still completes.
+      setMsg(`⧗ ${label} sent — no confirmation yet; watch the status`, "warn");
+      return;
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status} — ${await r.text()}`);
     setMsg(`✓ ${label} acknowledged`, "ok");
   } catch (e) {
@@ -351,7 +376,7 @@ async function applyAdjust(target, getters) {
   if (confirmMsg && !confirm(confirmMsg)) return;
 
   setAdjMsg(`» ${spec.label}…`);
-  const btns = document.querySelectorAll("#adjust .kbd-btn");
+  const btns = document.querySelectorAll("#adjust .btn");
   for (const b of btns) b.disabled = true;
 
   try {
@@ -397,7 +422,7 @@ function hydrateAdjust(raw) {
 
 async function applySpeedMode(mode) {
   setAdjMsg(`» SPEED MODE → ${mode.toUpperCase()}…`);
-  const btns = document.querySelectorAll("#adjust .kbd-btn");
+  const btns = document.querySelectorAll("#adjust .btn");
   for (const b of btns) b.disabled = true;
   try {
     const r = await fetch("/print/speed", {
@@ -556,22 +581,137 @@ function wireRtsp() {
 }
 
 // ---------------------------------------------------------------------------
+// Canvas multi-filament (CC2 only)
+
+let canvasControlEnabled = false;
+
+function setCanvasMsg(text, kind) {
+  const el = $("canvas-msg");
+  el.classList.remove("ok", "warn", "err");
+  if (kind) el.classList.add(kind);
+  el.textContent = text || "";
+}
+
+function renderCanvas(data) {
+  const panel = $("canvas-panel");
+  // Firmware 01.03.02.51 wraps the payload in canvas_info; tolerate a
+  // flat shape too (CanvasStatus.from_payload accepts both).
+  const ci = data && (data.canvas_info || (data.canvas_list ? data : null));
+  if (!ci) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const traysEl = $("canvas-trays");
+  traysEl.innerHTML = "";
+
+  for (const unit of (ci.canvas_list || [])) {
+    for (const t of (unit.tray_list || [])) {
+      const loaded = t.status === 1;
+      const active = t.tray_id === ci.active_tray_id;
+      const row = document.createElement("div");
+      row.className = "canvas-tray" + (active ? " active" : "") + (loaded ? "" : " empty");
+      const swatch = document.createElement("span");
+      swatch.className = "canvas-swatch";
+      swatch.style.background = t.filament_color;
+      const name = document.createElement("span");
+      name.className = "canvas-tray-name";
+      name.textContent = t.filament_name;
+      const type = document.createElement("span");
+      type.className = "canvas-tray-type";
+      type.textContent = t.filament_type;
+      const temp = document.createElement("span");
+      temp.className = "canvas-tray-temp";
+      temp.textContent = `${t.min_nozzle_temp}-${t.max_nozzle_temp}°`;
+      const stat = document.createElement("span");
+      stat.className = "canvas-tray-status";
+      stat.textContent = loaded ? "●" : "○";
+      row.append(swatch, name, type, temp, stat);
+      traysEl.appendChild(row);
+    }
+  }
+
+  $("canvas-refill-state").textContent = ci.auto_refill ? "ON" : "OFF";
+  $("canvas-refill-state").classList.toggle("on", ci.auto_refill);
+
+  const toggleBtn = $("canvas-refill-toggle");
+  if (canvasControlEnabled) {
+    toggleBtn.hidden = false;
+    $("canvas-refill-btn-label").textContent = ci.auto_refill ? "DISABLE" : "ENABLE";
+  }
+}
+
+let canvasSupported = true;
+let canvasRetryTimer = null;
+
+async function loadCanvas() {
+  // 501 means "this printer has no Canvas" (CC1) — stop asking. Anything
+  // else (504 timeout, 503 reconnecting, network blip) is transient: keep
+  // whatever is on screen and retry, so a CC2 that was mid-cooldown at
+  // page load doesn't lose its Canvas panel until a manual reload.
+  if (!canvasSupported) return;
+  if (canvasRetryTimer) { clearTimeout(canvasRetryTimer); canvasRetryTimer = null; }
+  try {
+    const r = await fetch("/canvas");
+    if (r.status === 501) {
+      canvasSupported = false;
+      $("canvas-panel").hidden = true;
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    renderCanvas(await r.json());
+  } catch (_) {
+    canvasRetryTimer = setTimeout(loadCanvas, 30000);
+  }
+}
+
+async function toggleRefill() {
+  const btn = $("canvas-refill-toggle");
+  const isOn = $("canvas-refill-state").textContent === "ON";
+  btn.disabled = true;
+  setCanvasMsg(isOn ? "disabling auto-refill…" : "enabling auto-refill…");
+  try {
+    const r = await fetch("/canvas/refill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !isOn }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    setCanvasMsg(`auto-refill ${isOn ? "disabled" : "enabled"}`, "ok");
+    setTimeout(loadCanvas, 2000);
+  } catch (e) {
+    setCanvasMsg(`toggle failed — ${e.message}`, "err");
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 1500);
+  }
+}
+
+function wireCanvas() {
+  $("canvas-refresh")?.addEventListener("click", () => {
+    setCanvasMsg("refreshing…");
+    loadCanvas().then(() => setCanvasMsg(""));
+  });
+  $("canvas-refill-toggle")?.addEventListener("click", toggleRefill);
+}
+
+// ---------------------------------------------------------------------------
 // Webcam resilience — if the MJPEG stream stalls, reload it.
 
 function wireWebcamKeepalive() {
   const img = $("webcam");
   let lastChange = Date.now();
-  let loads = 0;
-  img.addEventListener("load", () => { lastChange = Date.now(); loads++; });
+  // Some browsers fire `load` per MJPEG frame (Firefox), others once or
+  // never (Chrome). The staleness reload is therefore a last resort with
+  // a long fuse — on a browser that never re-fires `load`, a short fuse
+  // would tear down a perfectly healthy stream on every tick, and each
+  // reload costs a fresh upstream camera connection.
+  img.addEventListener("load", () => { lastChange = Date.now(); });
   img.addEventListener("error", () => {
     setTimeout(() => { img.src = `/stream?t=${Date.now()}`; }, 2000);
   });
   setInterval(() => {
-    if (Date.now() - lastChange > 15000) {
+    if (Date.now() - lastChange > 60000) {
       img.src = `/stream?t=${Date.now()}`;
       lastChange = Date.now();
     }
-  }, 5000);
+  }, 10000);
 }
 
 // ---------------------------------------------------------------------------
@@ -611,9 +751,11 @@ function noteStatusForPoll(pstatus) {
 (async function main() {
   wireControls();
   wireAdjust();
+  wireCanvas();
   wireRtsp();
   wireWebcamKeepalive();
   await loadInfo();
+  await loadCanvas();
   await loadRtsp();
   await pollOnce();
   connectSSE();
