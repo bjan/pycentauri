@@ -272,90 +272,138 @@ def test_canvas_parse_survives_malformed_payloads() -> None:
     assert CanvasStatus.from_payload({"canvas_info": {"canvas_list": "bogus"}}).tray_count == 0
 
 
-# --- speed-mode restore across filament switches -------------------------------
+# --- speed-mode pin & enforce ---------------------------------------------
 
 
 def _payload(status: int, mode: int) -> dict[str, Any]:
     return {"PrintInfo": {"Status": status}, "_cc2": {"speed_mode": mode}}
 
 
-def _printer(enable_control: bool = False) -> Any:
+def _printer(enable_control: bool = True) -> Any:
     from pycentauri.cc2 import CC2Printer
 
-    return CC2Printer("127.0.0.1", access_code="x", enable_control=enable_control)
-
-
-def test_switch_snapshots_and_flags_restore(monkeypatch: Any) -> None:
-    p = _printer(enable_control=False)
-    # Printing at sport (2)
-    p._track_speed_mode(_payload(13, 2))
-    assert p._speed_mode_during_print == 2
-    # Switch begins — snapshot taken
-    p._track_speed_mode(_payload(27, 1))
-    assert p._speed_mode_to_restore == 2
-    # Switch ends with the firmware reset to balanced; control off → no
-    # restore task, but the pending snapshot is consumed.
-    p._track_speed_mode(_payload(13, 1))
-    assert p._speed_mode_to_restore is None
-
-
-def test_no_restore_when_mode_survives_switch() -> None:
-    p = _printer()
-    p._track_speed_mode(_payload(13, 3))
-    p._track_speed_mode(_payload(27, 3))
-    assert p._speed_mode_to_restore == 3
-    # Firmware kept the mode: nothing to do, baseline continues
-    p._track_speed_mode(_payload(13, 3))
-    assert p._speed_mode_to_restore is None
-    assert p._speed_mode_during_print == 3
-
-
-def test_snapshot_not_overwritten_mid_switch() -> None:
-    p = _printer()
-    p._track_speed_mode(_payload(13, 2))
-    p._track_speed_mode(_payload(27, 1))
-    p._track_speed_mode(_payload(27, 1))  # more switch polls
-    assert p._speed_mode_to_restore == 2
-
-
-def test_idle_states_do_not_touch_tracking() -> None:
-    p = _printer()
-    p._track_speed_mode(_payload(13, 2))
-    p._track_speed_mode(_payload(0, 1))  # idle
-    p._track_speed_mode(_payload(6, 1))  # paused
-    assert p._speed_mode_during_print == 2
-    assert p._speed_mode_to_restore is None
-
-
-def test_pre_switch_reset_does_not_poison_baseline() -> None:
-    """Replicates the live trace from 2026-07-05 14:10: the firmware
-    resets speed_mode ~6 s BEFORE the head parks for the switch."""
-    p = _printer()
+    p = CC2Printer("127.0.0.1", access_code="x", enable_control=enable_control)
+    p._fired: list[int] = []
+    p._launch_enforce = p._fired.append  # record instead of spawning tasks
     t = [0.0]
+    p._clock = t
     p._now = lambda: t[0]
-    p._track_speed_mode(_payload(13, 2))  # printing at sport (bootstrap)
-    t[0] = 120.0
-    p._track_speed_mode(_payload(13, 2))  # still sport
-    # Pre-switch reset: mode drops while status is still 13
-    t[0] = 126.0
-    p._track_speed_mode(_payload(13, 1))
-    t[0] = 129.0
-    p._track_speed_mode(_payload(13, 1))  # held only 3 s — not promoted
-    assert p._speed_mode_during_print == 2
-    # Head parks, switch state
-    t[0] = 132.0
-    p._track_speed_mode(_payload(27, 1))
-    assert p._speed_mode_to_restore == 2  # snapshot is the REAL baseline
+    return p
 
 
-def test_sustained_mode_change_becomes_baseline() -> None:
+def _tick(p: Any, dt: float, status: int, mode: int) -> None:
+    p._clock[0] += dt
+    p._track_speed_mode(_payload(status, mode))
+
+
+def test_api_set_pins_immediately_and_enforces_after_grace() -> None:
     p = _printer()
-    t = [0.0]
-    p._now = lambda: t[0]
-    p._track_speed_mode(_payload(13, 1))  # bootstrap balanced
-    t[0] = 10.0
-    p._track_speed_mode(_payload(13, 3))  # user sets ludicrous on screen
-    assert p._speed_mode_during_print == 1  # not yet promoted
-    t[0] = 26.0
-    p._track_speed_mode(_payload(13, 3))  # held 16 s → promoted
-    assert p._speed_mode_during_print == 3
+    p._pinned_mode = 2  # what set_print_speed() records
+    _tick(p, 0, 13, 2)
+    assert p._fired == []
+    # Firmware resets to balanced mid-print; not enforced until it holds 12 s
+    _tick(p, 5, 13, 1)
+    _tick(p, 5, 13, 1)
+    assert p._fired == []
+    _tick(p, 5, 13, 1)  # mismatch has now persisted 10 s... (first at t=10)
+    _tick(p, 5, 13, 1)  # 15 s since mismatch start -> fires
+    assert p._fired == [2]
+
+
+def test_pre_switch_reset_window_never_fires() -> None:
+    """The 6-10 s balanced window before the head parks stays untouched."""
+    p = _printer()
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)
+    _tick(p, 3, 13, 1)  # pre-switch reset
+    _tick(p, 3, 13, 1)  # 6 s in
+    _tick(p, 3, 27, 1)  # head parks -> mismatch clock cleared
+    _tick(p, 60, 27, 1)  # switch runs
+    assert p._fired == []
+    # Resume: reset persists, enforcement kicks in after the grace period
+    _tick(p, 5, 13, 1)
+    _tick(p, 13, 13, 1)
+    assert p._fired == [2]
+
+
+def test_screen_change_to_nonbalanced_becomes_pin() -> None:
+    p = _printer()
+    _tick(p, 0, 13, 1)  # printing at balanced, nothing pinned
+    _tick(p, 5, 13, 3)  # user picks ludicrous on the touchscreen
+    assert p._pinned_mode is None
+    _tick(p, 16, 13, 3)  # held > PIN_LEARN_S -> adopted
+    assert p._pinned_mode == 3
+    assert p._fired == []
+
+
+def test_balanced_is_never_learned_as_pin_while_pinned() -> None:
+    p = _printer()
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)
+    # Sustained balanced (reset or screen tap) never displaces the pin...
+    _tick(p, 10, 13, 1)
+    _tick(p, 30, 13, 1)
+    assert p._pinned_mode == 2
+    # ...and enforcement fired for it
+    assert p._fired == [2]
+
+
+def test_no_pin_means_no_enforcement() -> None:
+    p = _printer()
+    _tick(p, 0, 13, 1)
+    _tick(p, 60, 13, 1)
+    assert p._fired == []
+
+
+def test_print_end_clears_pin() -> None:
+    p = _printer()
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)
+    _tick(p, 5, 9, 1)  # completed
+    assert p._pinned_mode is None
+    _tick(p, 5, 13, 1)  # a new print at balanced: nothing enforced
+    _tick(p, 60, 13, 1)
+    assert p._fired == []
+
+
+def test_enforce_rate_limited() -> None:
+    p = _printer()
+    p._pinned_mode = 2
+    _tick(p, 0, 13, 2)
+    _tick(p, 5, 13, 1)
+    _tick(p, 13, 13, 1)  # fires (mismatch held 13 s)
+    _tick(p, 5, 13, 1)  # still mismatched, but inside the 30 s cooldown
+    _tick(p, 5, 13, 1)
+    assert p._fired == [2]
+    _tick(p, 30, 13, 1)  # cooldown over -> fires again
+    assert p._fired == [2, 2]
+
+
+def test_screen_override_beats_enforcement() -> None:
+    """A touchscreen change to a non-balanced mode must be learned BEFORE
+    enforcement of the old pin would revert it (PIN_LEARN_S < ENFORCE_AFTER_S)."""
+    p = _printer()
+    p._pinned_mode = 1  # balanced pinned via the API
+    _tick(p, 0, 13, 1)
+    _tick(p, 2, 13, 2)  # user picks sport on the screen (mismatch clock starts)
+    _tick(p, 5, 13, 2)  # 5 s held
+    _tick(p, 4, 13, 2)  # 9 s held: learned as the new pin, before 12 s enforcement
+    assert p._pinned_mode == 2
+    assert p._fired == []
+
+
+def test_auto_releases_pin() -> None:
+    import asyncio
+
+    p = _printer()
+    p._pinned_mode = 2
+
+    async def run() -> None:
+        result = await p.set_print_speed("auto")
+        assert result.inner["pin"] == "released"
+
+    asyncio.run(run())
+    assert p._pinned_mode is None
+    _tick(p, 0, 13, 1)
+    _tick(p, 60, 13, 1)  # balanced persists, nothing enforced
+    assert p._fired == []

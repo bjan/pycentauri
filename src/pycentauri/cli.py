@@ -378,7 +378,8 @@ def cmd_speed(
         str,
         typer.Argument(
             help="Speed mode: silent | balanced | sport | ludicrous "
-            "(or the integer 50 | 100 | 130 | 160).",
+            "(or the integer 50 | 100 | 130 | 160). On a CC2, 'auto' "
+            "releases the speed pin and stops enforcing a mode.",
         ),
     ],
     host: HostOpt = None,

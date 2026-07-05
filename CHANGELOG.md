@@ -6,6 +6,34 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-07-05
+
+### Changed
+- **CC2 speed-mode persistence redesigned as pin-and-enforce.** The
+  0.6.1 snapshot-per-switch restore lost an arms race with the
+  firmware: after eight consecutive successful restores, a reset
+  arriving outside the covered window (late after a restore, or
+  mid-print with no switch at all — observed 2026-07-05 ~15:00)
+  poisoned the baseline and silently disabled every restore after it.
+  The firmware only ever resets TO balanced, so the model is now: the
+  mode you set is pinned (immediately via pycentauri; after holding
+  15 s when set from the touchscreen, since a non-balanced mode can
+  only come from a human), and any disagreement lasting 12 s while
+  printing is re-applied, at most every 30 s. One consequence,
+  deliberate: while a mode is pinned, selecting *balanced* from the
+  touchscreen is indistinguishable from a firmware reset and will be
+  reverted — switch to balanced through pycentauri instead, which
+  re-pins. Pins clear when the print ends, and ``speed auto`` (CLI),
+  ``{"mode": "auto"}`` (HTTP), or the web UI's Auto button release the
+  pin explicitly, returning speed control to the printer.
+- Root cause fully mapped (wire captures, 2026-07-05): every reset is
+  a **service operation** — full filament switches, plus brief nozzle
+  wipe / purge operations at the chute that are too short to register
+  as "switching" — and a human's touchscreen tap is byte-identical to
+  a firmware reset on the wire, so balanced-from-touchscreen cannot be
+  auto-detected while a pin is active. Use Auto or set balanced via
+  pycentauri instead.
+
 ## [0.6.1] - 2026-07-05
 
 ### Fixed

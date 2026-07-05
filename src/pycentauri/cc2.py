@@ -40,11 +40,21 @@ log = logging.getLogger(__name__)
 MQTT_PORT = 1883
 CC2_USERNAME = "elegoo"
 PING_INTERVAL_S = 30.0
-# A speed mode must hold this long before it becomes the restore baseline —
-# the firmware resets speed_mode several seconds BEFORE the head parks for a
-# filament switch (observed 2026-07-05: reset at T-6s), and without the hold
-# that transient poisons the baseline.
-BASELINE_HOLD_S = 15.0
+# Speed-mode pinning. The firmware only ever resets speed_mode TO balanced
+# (1) — before filament switches (observed at T-6..10s before the head
+# parks), sometimes again after a restore, and occasionally mid-print with
+# no switch at all (observed 2026-07-05 ~15:00). A snapshot-per-switch
+# design lost that arms race, so instead the mode a user selects is PINNED
+# and enforced: a disagreement lasting ENFORCE_AFTER_S while printing gets
+# re-applied, at most once per ENFORCE_MIN_INTERVAL_S. A sustained
+# non-balanced mode from the touchscreen (held PIN_LEARN_S) adopts the pin,
+# since the firmware never resets to a non-balanced mode.
+# PIN_LEARN_S must be SHORTER than ENFORCE_AFTER_S: a touchscreen change to
+# a non-balanced mode has to be adopted as the new pin before enforcement
+# would revert it, or screen users could never override a pinned mode.
+PIN_LEARN_S = 8.0
+ENFORCE_AFTER_S = 12.0
+ENFORCE_MIN_INTERVAL_S = 30.0
 # Lifecycle commands (start/pause/stop/resume) are answered only after the
 # firmware finishes the mechanical sequence — a resume reheats and unparks
 # before responding, easily exceeding the default 15 s request timeout
@@ -270,14 +280,13 @@ class CC2Printer(Printer):
         self._last_full_result: dict[str, Any] | None = None
         self._connect_error: str | None = None
         self._ping_task: asyncio.Task[None] | None = None
-        # Speed-mode restore across Canvas filament switches: the firmware
-        # resets speed_mode to balanced (1) on every mid-print switch
-        # (verified 2026-07-05 — mode stays 1 after the switch completes).
-        self._speed_mode_during_print: int | None = None
-        self._speed_mode_to_restore: int | None = None
-        self._restore_task: asyncio.Task[None] | None = None
-        self._mode_candidate: int | None = None
-        self._mode_candidate_since: float = 0.0
+        # Speed-mode pinning (see module constants for the rationale).
+        self._pinned_mode: int | None = None
+        self._pin_candidate: int | None = None
+        self._pin_candidate_since: float = 0.0
+        self._mismatch_since: float | None = None
+        self._last_enforce: float = float("-inf")
+        self._enforce_task: asyncio.Task[None] | None = None
         self._now = time.monotonic  # overridable for tests
 
     @classmethod
@@ -448,6 +457,14 @@ class CC2Printer(Printer):
 
     async def set_print_speed(self, mode: str | int) -> sdcp.ParsedMessage:
         self._require_control("set_print_speed")
+        if isinstance(mode, str) and mode.strip().lower() == "auto":
+            # Release the pin: stop enforcing and let the printer (and its
+            # touchscreen) own the speed mode again. No wire command needed.
+            self._pinned_mode = None
+            self._pin_candidate = None
+            self._mismatch_since = None
+            log.info("speed-mode pin released (auto)")
+            return self._wrap_result(1031, {"error_code": 0, "pin": "released"})
         if isinstance(mode, str):
             key = mode.strip().lower()
             if key not in self.PRINT_SPEED_MODES:
@@ -463,12 +480,10 @@ class CC2Printer(Printer):
                     f"{sorted(self.PRINT_SPEED_MODES.values())}"
                 )
         result = await self._cc2_request(1031, {"mode": value})
-        # The user's explicit choice supersedes any pending post-switch
-        # restore and becomes the new baseline.
-        self._speed_mode_during_print = value
-        self._mode_candidate = None
-        if self._speed_mode_to_restore is not None:
-            self._speed_mode_to_restore = value
+        # An explicit choice through pycentauri pins the mode.
+        self._pinned_mode = value
+        self._pin_candidate = None
+        self._mismatch_since = None
         return self._wrap_result(1031, result)
 
     async def set_fan_speed(
@@ -534,7 +549,7 @@ class CC2Printer(Printer):
         if self._closed:
             return
         self._closed = True
-        for task in (self._ping_task, self._restore_task):
+        for task in (self._ping_task, self._enforce_task):
             if task is not None and not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -657,73 +672,83 @@ class CC2Printer(Printer):
             log.exception("failed to handle CC2 status push")
 
     def _track_speed_mode(self, payload: dict[str, Any]) -> None:
-        """Restore the speed mode after a Canvas filament switch.
+        """Pin-and-enforce the user's speed mode (runs on the asyncio loop).
 
-        The firmware resets ``speed_mode`` to balanced on every mid-print
-        filament switch (verified 2026-07-05). We snapshot the mode in
-        effect when a switch starts (print_status 27) and re-apply it once
-        printing resumes, so the user's selection — made from any surface,
-        including the touchscreen — survives the switch. Requires
-        ``enable_control``; read-only sessions just log the reset.
+        The firmware resets ``speed_mode`` to balanced around filament
+        switches and occasionally mid-print. Whatever mode the user set —
+        through pycentauri (pins immediately) or the touchscreen (pins
+        after holding ``PIN_LEARN_S``) — is re-applied whenever the
+        printer disagrees for ``ENFORCE_AFTER_S`` while printing. Only
+        non-balanced modes are learned from the wire, because a flip to
+        balanced is indistinguishable from a firmware reset.
         """
         print_status = payload.get("PrintInfo", {}).get("Status")
         speed_mode = payload.get("_cc2", {}).get("speed_mode")
         if not isinstance(speed_mode, int) or print_status is None:
             return
-        if print_status == 27:
-            if self._speed_mode_to_restore is None and self._speed_mode_during_print is not None:
-                self._speed_mode_to_restore = self._speed_mode_during_print
+        if print_status in (0, 8, 9, 14):
+            # Print over (idle/stopped/completed/error): the pin dies with it.
+            self._pinned_mode = None
+            self._pin_candidate = None
+            self._mismatch_since = None
             return
         if print_status != 13:
+            # Switching filament, pausing, etc. — never learn or enforce
+            # here, and a mismatch clock from before doesn't carry across.
+            self._mismatch_since = None
             return
-        want = self._speed_mode_to_restore
-        if want is not None:
-            self._speed_mode_to_restore = None
-            if want != speed_mode:
-                if self.enable_control:
-                    self._restore_task = asyncio.create_task(
-                        self._restore_speed_mode(want),
-                        name=f"pycentauri-cc2-speedrestore-{self.host}",
-                    )
-                else:
-                    log.warning(
-                        "filament switch reset speed_mode %d -> %d; "
-                        "enable_control is off so it will not be restored",
-                        want,
-                        speed_mode,
-                    )
-                return
-        # Track the running mode, but not while a restore is in flight —
-        # the firmware still reports the reset value for a poll or two.
-        if self._restore_task is not None and not self._restore_task.done():
-            return
-        if self._speed_mode_during_print is None:
-            # Bootstrap: first observation is the baseline.
-            self._speed_mode_during_print = speed_mode
-            return
-        if speed_mode == self._speed_mode_during_print:
-            self._mode_candidate = None
-            return
-        # Debounce: a changed mode must hold BASELINE_HOLD_S before it
-        # becomes the restore baseline, so the firmware's pre-switch reset
-        # (which fires seconds before the head parks) never gets adopted.
-        now = self._now()
-        if speed_mode != self._mode_candidate:
-            self._mode_candidate = speed_mode
-            self._mode_candidate_since = now
-        elif now - self._mode_candidate_since >= BASELINE_HOLD_S:
-            self._speed_mode_during_print = speed_mode
-            self._mode_candidate = None
 
-    async def _restore_speed_mode(self, mode: int) -> None:
-        await asyncio.sleep(2.0)  # let the firmware settle after the switch
+        now = self._now()
+
+        # Learn a pin from the wire: only non-balanced modes qualify.
+        if speed_mode != 1 and speed_mode != self._pinned_mode:
+            if self._pin_candidate == speed_mode:
+                if now - self._pin_candidate_since >= PIN_LEARN_S:
+                    self._pinned_mode = speed_mode
+                    self._pin_candidate = None
+                    self._mismatch_since = None
+            else:
+                self._pin_candidate = speed_mode
+                self._pin_candidate_since = now
+        elif speed_mode == self._pinned_mode:
+            self._pin_candidate = None
+
+        # Enforce the pin.
+        if self._pinned_mode is None or speed_mode == self._pinned_mode:
+            self._mismatch_since = None
+            return
+        if self._mismatch_since is None:
+            self._mismatch_since = now
+            return
+        if now - self._mismatch_since < ENFORCE_AFTER_S:
+            return
+        if self._enforce_task is not None and not self._enforce_task.done():
+            return
+        if now - self._last_enforce < ENFORCE_MIN_INTERVAL_S:
+            return
+        self._last_enforce = now
+        if self.enable_control:
+            self._launch_enforce(self._pinned_mode)
+        else:
+            log.warning(
+                "speed_mode drifted to %d but pin is %d; enable_control is off "
+                "so it will not be re-applied",
+                speed_mode,
+                self._pinned_mode,
+            )
+
+    def _launch_enforce(self, mode: int) -> None:
+        self._enforce_task = asyncio.create_task(
+            self._apply_pinned_mode(mode),
+            name=f"pycentauri-cc2-speedpin-{self.host}",
+        )
+
+    async def _apply_pinned_mode(self, mode: int) -> None:
         try:
             await self._cc2_request(1031, {"mode": mode})
-            log.info("restored speed_mode %d after filament switch", mode)
+            log.info("re-applied pinned speed_mode %d", mode)
         except Exception:
-            log.warning(
-                "could not restore speed_mode %d after filament switch", mode, exc_info=True
-            )
+            log.warning("could not re-apply pinned speed_mode %d", mode, exc_info=True)
 
     def _publish_register(self) -> None:
         topic = f"elegoo/{self._serial_number}/api_register"
