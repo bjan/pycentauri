@@ -6,6 +6,18 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-07-05
+
+### Fixed
+- `GET /openapi.json` (and therefore the `/docs` Swagger UI) returned a
+  500 instead of the API schema. The Canvas `RefillBody` request model
+  was defined inside `create_app()`, so under
+  `from __future__ import annotations` its forward references couldn't be
+  resolved at schema-generation time (request validation still worked,
+  which is why nothing else surfaced it). Moved it to module scope with
+  the other request-body models; added a test that renders the schema.
+
+
 ## [0.6.3] - 2026-07-05
 
 ### Changed

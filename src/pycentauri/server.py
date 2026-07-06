@@ -269,6 +269,10 @@ class TemperatureBody(BaseModel):
     chamber: float | None = Field(None, ge=0, le=60)
 
 
+class RefillBody(BaseModel):
+    enabled: bool = Field(..., description="true to enable auto-refill, false to disable.")
+
+
 # --- Dependency helpers -----------------------------------------------------
 
 
@@ -711,9 +715,6 @@ def create_app(
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
-
-    class RefillBody(BaseModel):
-        enabled: bool = Field(..., description="true to enable auto-refill, false to disable.")
 
     @app.post("/canvas/refill", tags=["control"])
     async def set_refill(

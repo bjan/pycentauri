@@ -69,6 +69,18 @@ async def test_read_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     await server.stop()
 
 
+async def test_openapi_schema_generates(monkeypatch: pytest.MonkeyPatch) -> None:
+    # /openapi.json (and thus /docs) must render. Regression for a request
+    # body model defined inside create_app(), whose forward refs couldn't
+    # be resolved under `from __future__ import annotations`. Control on so
+    # every body model — including the Canvas RefillBody — is registered.
+    app = server_module.create_app("127.0.0.1", enable_control=True, mainboard_id=MAINBOARD)
+    async with await _asgi_client(app) as client:
+        r = await client.get("/openapi.json")
+        assert r.status_code == 200
+        assert r.json()["info"]["title"]
+
+
 async def test_control_endpoints_404_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _FakePrinter()
     await server.start()
