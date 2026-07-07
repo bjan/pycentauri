@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from pycentauri.cc2 import (
     _cc2_attrs_to_cc1,
     _cc2_machine_status_to_print_status,
@@ -425,3 +427,32 @@ def test_enforce_rate_limited_across_repeated_switches() -> None:
     assert p._fired == [2]  # within 30s cooldown, no repeat
     _tick(p, 30, 13, 1)  # cooldown elapsed -> enforce again
     assert p._fired == [2, 2]
+
+
+# --- HTTP bootstrap error surfacing -------------------------------------------
+
+
+async def test_fetch_serial_connect_error_names_lan_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused HTTP :80 bootstrap must raise a PrinterError that points at
+    the CC2's 'LAN Only' setting, not leak a raw httpx ConnectError."""
+    import httpx
+
+    from pycentauri import cc2
+    from pycentauri.client import PrinterError
+
+    class _FailClient:
+        def __init__(self, *a: Any, **k: Any) -> None: ...
+        async def __aenter__(self) -> _FailClient:
+            return self
+
+        async def __aexit__(self, *a: Any) -> bool:
+            return False
+
+        async def get(self, *a: Any, **k: Any) -> Any:
+            raise httpx.ConnectError("All connection attempts failed")
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FailClient)
+    with pytest.raises(PrinterError, match="LAN Only"):
+        await cc2._fetch_serial("192.0.2.1", "code")

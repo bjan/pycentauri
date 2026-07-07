@@ -836,15 +836,27 @@ async def _fetch_serial(host: str, access_code: str, timeout: float = 5.0) -> st
     import httpx
 
     url = f"http://{host}/system/info"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.get(url, params={"X-Token": access_code})
-        if resp.status_code == 401:
-            raise PrinterError(
-                f"{host} rejected the access code (HTTP 401). "
-                "Check the code shown on the printer's screen."
-            )
-        resp.raise_for_status()
-        data = resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, params={"X-Token": access_code})
+    except httpx.RequestError as err:
+        # MQTT :1883 answered (that's how we got here) but the HTTP :80
+        # bootstrap didn't. On the CC2 the local API is gated behind
+        # "LAN Only" mode — with it off, the printer works through
+        # Elegoo's cloud and leaves :80 closed.
+        raise PrinterError(
+            f"reached {host} on MQTT :1883 but could not connect to its HTTP "
+            f"API on :80 to fetch the serial number ({err!r}). Enable "
+            "'LAN Only' mode in the printer's network settings — the CC2 "
+            "gates its local API behind it."
+        ) from err
+    if resp.status_code == 401:
+        raise PrinterError(
+            f"{host} rejected the access code (HTTP 401). "
+            "Check the code shown on the printer's screen."
+        )
+    resp.raise_for_status()
+    data = resp.json()
     sn: str = data.get("system_info", {}).get("sn", "")
     if not sn:
         raise PrinterError(f"failed to fetch serial number from {host}: {data}")

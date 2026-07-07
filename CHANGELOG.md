@@ -6,6 +6,25 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-07-06
+
+### Fixed
+- CC2 connect now surfaces a clear error when the printer's HTTP API is
+  unreachable instead of leaking a raw `httpx.ConnectError`. The CC2
+  gates its local API behind **"LAN Only" mode** — with it off, the
+  printer works through Elegoo's cloud and leaves port 80 closed, so the
+  serial-number bootstrap fails even though MQTT :1883 answers. The
+  error now says exactly that and names the setting to change. (Reported
+  by a user on firmware 02.00.02.00 whose connection worked the moment
+  they enabled LAN Only.)
+
+### Documentation
+- README and `docs/PROTOCOL.md` now document that "LAN Only" mode must
+  be enabled on the CC2 for local control, and note that firmware
+  02.00.02.00 is a lockdown release (removes SSH, blocks downgrades)
+  with a community repacked v01.03.02.51 available if needed.
+
+
 ## [0.6.4] - 2026-07-05
 
 ### Fixed

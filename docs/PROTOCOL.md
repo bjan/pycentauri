@@ -487,6 +487,18 @@ parameter**: `GET /system/info?X-Token=<code>`. The header form
 (`X-Token: <code>`) is rejected with 401 on firmware 01.03.02.51 —
 only the query parameter works, despite the Elegoo SDK sending both.
 
+**"LAN Only" mode must be enabled** on the printer (network settings on
+the touchscreen) for the local API to be reachable at all. With it off,
+the CC2 operates through Elegoo's cloud and leaves port 80 closed — the
+serial-number bootstrap then fails with a connection error even though
+MQTT :1883 answers. Confirmed required on firmware **02.00.02.00**
+(reported by a user 2026-07-06, whose connection started working the
+moment they enabled it) and recommended on all firmware. Note that
+02.00.02.00 is a lockdown release that also **removes SSH** and blocks
+firmware downgrades; if a CC2 on 2.0 still won't talk after enabling LAN
+Only, the OpenCentauri project publishes a repacked v01.03.02.51 that
+bypasses the downgrade guard.
+
 ## MQTT topic structure
 
 All topics are rooted under `elegoo/<serial_number>/`. The serial

@@ -54,6 +54,13 @@ touchscreen under network/connectivity settings. Pass it as
 `--access-code` / `access_code=` / `PYCENTAURI_ACCESS_CODE`. The examples
 below use `Ab3dEf` as a stand-in — substitute your own.
 
+> **Enable "LAN Only" mode on the CC2** (network settings on the
+> touchscreen). The CC2 gates its local API behind it — with LAN Only
+> off the printer works through Elegoo's cloud and leaves the local HTTP
+> endpoint closed, so pycentauri can't reach it and you'll get a
+> connection error. This is required on firmware 2.0 and recommended on
+> all CC2 firmware.
+
 Every CLI command accepts `--host` (env: `PYCENTAURI_HOST`). With no host
 given, commands try UDP discovery, which only finds CC1s.
 
