@@ -140,7 +140,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
 
     @mcp.tool()
     async def discover_printers() -> list[dict[str, Any]]:
-        """Broadcast the SDCP discovery probe and return responding printers.
+        """Broadcast the CC1 and CC2 discovery probes and return responding printers.
 
         Useful to verify the configured host matches what's actually on the
         LAN, or to find a newly-added printer's IP.
@@ -149,10 +149,13 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         return [
             {
                 "host": p.host,
+                "protocol": p.protocol,
                 "mainboard_id": p.mainboard_id,
                 "name": p.name,
                 "machine_name": p.machine_name,
                 "firmware_version": p.firmware_version,
+                "serial_number": p.serial_number,
+                "lan_status": p.lan_status,
             }
             for p in found
         ]
