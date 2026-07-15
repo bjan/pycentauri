@@ -6,6 +6,11 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **CC2 discovery is now implemented.** The CC2 listens on UDP port 52700
+  for JSON-RPC `{"id": 0, "method": 7000}` as opposed to the `M99999`
+  payload over port 3000 on the CC1. `--access-code` must still be passed.
+
 ## [0.7.0] - 2026-07-14
 
 ### Fixed
