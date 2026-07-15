@@ -26,20 +26,22 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import subprocess
+import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from importlib.resources import files as resource_files
+from pathlib import Path
 from typing import Any
 
-import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from pycentauri import __version__
+from pycentauri import __version__, mjpeg_broadcast
 from pycentauri import rtsp as rtsp_module
 from pycentauri.camera import CAMERA_PATH
 from pycentauri.client import (
@@ -86,6 +88,11 @@ class PrinterManager:
         self._supervisor: asyncio.Task[None] | None = None
         self._ready = asyncio.Event()
         self._closing = False
+        # One shared upstream camera connection for all browsers — the
+        # printer's MJPEG server starves under connection churn.
+        self.camera = mjpeg_broadcast.CameraBroadcaster(
+            lambda: f"http://{self.host}:{self.printer.camera_port}{CAMERA_PATH}"
+        )
 
     @property
     def printer(self) -> Printer:
@@ -104,6 +111,8 @@ class PrinterManager:
 
     async def stop(self) -> None:
         self._closing = True
+        with contextlib.suppress(Exception):
+            await self.camera.close()
         if self._supervisor is not None and not self._supervisor.done():
             self._supervisor.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -273,6 +282,10 @@ class RefillBody(BaseModel):
     enabled: bool = Field(..., description="true to enable auto-refill, false to disable.")
 
 
+class LightBody(BaseModel):
+    on: bool = Field(..., description="true to turn the chamber light on, false for off.")
+
+
 # --- Dependency helpers -----------------------------------------------------
 
 
@@ -415,51 +428,18 @@ def create_app(
     ) -> StreamingResponse:
         """Proxy the printer's MJPEG stream.
 
-        The printer serves ``multipart/x-mixed-replace`` on port 3031.
-        Browsers can render this directly in an ``<img src=...>`` tag. We
-        proxy it through the API server so the UI never needs to know the
-        printer's IP and so cross-origin isn't an issue.
+        The printer serves ``multipart/x-mixed-replace`` (CC1 :3031,
+        CC2 :8080). Browsers render it directly in an ``<img src=…>``.
+        Every browser here attaches to a *single* shared upstream
+        connection (see :class:`CameraBroadcaster`): the printer's camera
+        server starves under connection churn, so no matter how many tabs
+        or reloads hit ``/stream``, the printer only ever sees one.
         """
-        cam_port = manager.printer.camera_port
-        url = f"http://{manager.host}:{cam_port}{CAMERA_PATH}"
-        # read=None is deliberate (MJPEG never ends); connect must be
-        # bounded or a wedged printer hangs every /stream request forever.
-        client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
-        )
-
-        # Open the upstream connection *before* building the response so we
-        # can forward its Content-Type verbatim — the multipart boundary
-        # string differs between CC1 and CC2 firmware.
         try:
-            upstream_cm = client.stream("GET", url)
-            upstream = await upstream_cm.__aenter__()
-        except Exception as err:
-            await client.aclose()
-            raise HTTPException(status_code=502, detail=f"webcam unreachable: {err}") from err
-        if upstream.status_code != 200:
-            await upstream_cm.__aexit__(None, None, None)
-            await client.aclose()
-            raise HTTPException(
-                status_code=502, detail=f"webcam returned HTTP {upstream.status_code}"
-            )
-        media_type = upstream.headers.get(
-            "content-type", "multipart/x-mixed-replace; boundary=frame"
-        )
-
-        async def body() -> AsyncIterator[bytes]:
-            try:
-                async for chunk in upstream.aiter_raw():
-                    yield chunk
-            except Exception as err:
-                log.warning("MJPEG proxy error: %r", err)
-            finally:
-                with contextlib.suppress(Exception):
-                    await upstream_cm.__aexit__(None, None, None)
-                with contextlib.suppress(Exception):
-                    await client.aclose()
-
-        return StreamingResponse(body(), media_type=media_type)
+            media_type, chunks = await manager.camera.subscribe()
+        except mjpeg_broadcast.CameraUnavailable as err:
+            raise HTTPException(status_code=502, detail=f"webcam unavailable: {err}") from err
+        return StreamingResponse(chunks, media_type=media_type)
 
     @app.get("/discover", tags=["read"])
     async def discover_endpoint() -> list[dict[str, Any]]:
@@ -512,6 +492,57 @@ def create_app(
         except PrinterError as err:
             raise HTTPException(status_code=501, detail=str(err)) from err
         return cs.raw
+
+    @app.get("/files", tags=["read"])
+    async def list_files(
+        manager: PrinterManager = Depends(get_manager),
+        storage: str = "local",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List files on the printer (CC2 only). Query: ?storage=local|u-disk&offset=0&limit=100."""
+        try:
+            return await manager.printer.list_files(storage, offset=offset, limit=limit)
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=str(err)) from err
+        except PrinterError as err:
+            raise HTTPException(status_code=501, detail=str(err)) from err
+
+    @app.post("/files/delete", tags=["control"])
+    async def delete_files(
+        body: dict[str, Any],
+        manager: PrinterManager = Depends(require_control),
+    ) -> dict[str, Any]:
+        """Delete file(s) from the printer (CC2 only). Body: {"filenames": [...], "storage": "local"}."""
+        filenames = body.get("filenames", [])
+        storage = body.get("storage", "local")
+        if not filenames:
+            raise HTTPException(status_code=400, detail="filenames list is required")
+        try:
+            result = await manager.printer.delete_files(filenames, storage=storage)
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        return {"ok": True, "deleted": filenames, "response": result}
+
+    @app.get("/disk", tags=["read"])
+    async def disk_info(
+        manager: PrinterManager = Depends(get_manager),
+    ) -> dict[str, Any]:
+        """Disk usage (CC2 only): total_bytes, used_bytes."""
+        try:
+            return await manager.printer.disk_info()
+        except PrinterError as err:
+            raise HTTPException(status_code=501, detail=str(err)) from err
+
+    @app.get("/history", tags=["read"])
+    async def print_history(
+        manager: PrinterManager = Depends(get_manager),
+    ) -> dict[str, Any]:
+        """Print history (CC2 only)."""
+        try:
+            return await manager.printer.print_history()
+        except PrinterError as err:
+            raise HTTPException(status_code=501, detail=str(err)) from err
 
     # --- RTSP bridge --------------------------------------------------------
 
@@ -586,9 +617,18 @@ def create_app(
 
     # --- Static web UI ------------------------------------------------------
 
+    class _NoCacheStatic(StaticFiles):
+        # The dashboard updates with pycentauri; force browsers to revalidate
+        # (cheap via ETag) so a redeploy is picked up on a normal reload
+        # instead of serving a stale cached app.js.
+        async def get_response(self, path: str, scope: Any) -> Response:
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
     _web_root = resource_files("pycentauri").joinpath("web")
     if _web_root.is_dir():
-        app.mount("/ui", StaticFiles(directory=str(_web_root), html=True), name="ui")
+        app.mount("/ui", _NoCacheStatic(directory=str(_web_root), html=True), name="ui")
 
         @app.get("/", include_in_schema=False)
         async def root_redirect() -> RedirectResponse:
@@ -725,6 +765,44 @@ def create_app(
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "response": result.inner}
+
+    @app.post("/light", tags=["control"])
+    async def set_light(
+        body: LightBody, manager: PrinterManager = Depends(require_control)
+    ) -> dict[str, Any]:
+        """Turn the chamber light on/off (CC2 only)."""
+        try:
+            result = await manager.printer.set_light(body.on)
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        return {"ok": True, "response": result.inner}
+
+    @app.post("/files/upload", tags=["control"])
+    async def upload_file_route(
+        file: UploadFile = File(..., description="The file to upload (e.g. a .gcode)."),
+        start: bool = Form(False),
+        manager: PrinterManager = Depends(require_control),
+    ) -> dict[str, Any]:
+        # Spool the browser upload to a temp file, then chunk it to the
+        # printer over HTTP. Path(...).name strips any directory components
+        # from the client-supplied filename (no traversal).
+        remote_name = Path(file.filename or "upload.gcode").name
+        fd, tmp_path = tempfile.mkstemp(suffix=f"_{remote_name}")
+        try:
+            with os.fdopen(fd, "wb") as tmp:
+                while chunk := await file.read(1024 * 1024):
+                    tmp.write(chunk)
+            remote = await manager.printer.upload_file(tmp_path, remote_name=remote_name)
+            resp: dict[str, Any] = {"ok": True, "filename": remote}
+            if start:
+                started = await manager.printer.start_print(remote)
+                resp["start_response"] = started.inner
+            return resp
+        except PrinterError as err:
+            raise HTTPException(status_code=502, detail=str(err)) from err
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
 
     return app
 

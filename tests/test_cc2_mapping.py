@@ -274,10 +274,15 @@ def test_canvas_parse_survives_malformed_payloads() -> None:
     assert CanvasStatus.from_payload({"canvas_info": {"canvas_list": "bogus"}}).tray_count == 0
 
 
-# --- speed-mode pin, enforce & human/firmware adjudication ----------------
+# --- speed-mode pin (explicit; re-applied on switch completion) -----------
+#
+# Firmware 02.01.00.00 streams gcode_move.speed_mode as a per-move value, so
+# pycentauri no longer infers or enforces the pin from the wire. The pin is
+# explicit, cleared at print end, and re-asserted once when a Canvas filament
+# switch completes (27 -> 13).
 
 
-def _payload(status: int, mode: int) -> dict[str, Any]:
+def _payload(status: int, mode: int = 1) -> dict[str, Any]:
     return {"PrintInfo": {"Status": status}, "_cc2": {"speed_mode": mode}}
 
 
@@ -286,120 +291,59 @@ def _printer(enable_control: bool = True) -> Any:
 
     p = CC2Printer("127.0.0.1", access_code="x", enable_control=enable_control)
     p._fired: list[int] = []
-    p._enforce_calls = 0
-
-    def fake_enforce(current_mode: int, now: float) -> None:
-        # Mirror the real rate-limit + record instead of spawning a task.
-        import pycentauri.cc2 as m
-
-        if now - p._last_enforce < m.ENFORCE_MIN_INTERVAL_S:
-            return
-        p._last_enforce = now
-        p._fired.append(p._pinned_mode)
-
-    p._enforce = fake_enforce
+    # Record re-apply calls instead of spawning a real 1031 task.
+    p._reapply_pin = lambda: p._fired.append(p._pinned_mode)
     t = [0.0]
     p._clock = t
     p._now = lambda: t[0]
     return p
 
 
-def _tick(p: Any, dt: float, status: int, mode: int) -> None:
+def _tick(p: Any, dt: float, status: int, mode: int = 1) -> None:
     p._clock[0] += dt
     p._track_speed_mode(_payload(status, mode))
 
 
-# --- firmware reset: switch follows, mode is re-applied on resume ---------
-
-
-def test_firmware_reset_reenforced_after_switch() -> None:
+def test_pin_reapplied_once_on_switch_completion() -> None:
     p = _printer()
     p._pinned_mode = 2
-    _tick(p, 0, 13, 2)  # printing at sport
-    _tick(p, 3, 13, 1)  # pre-switch reset (T=3)
-    _tick(p, 4, 13, 1)  # still no park; within window, wait
-    assert p._fired == []
-    _tick(p, 2, 27, 1)  # head parks -> switch seen
-    _tick(p, 180, 27, 1)  # switch runs for 3 min
-    assert p._fired == []  # never released, never enforced mid-switch
-    _tick(p, 1, 13, 1)  # resume, still balanced -> re-apply sport
+    _tick(p, 0, 13)  # printing
+    _tick(p, 5, 27)  # filament switch (parked)
+    _tick(p, 180, 27)  # switch runs
+    assert p._fired == []  # nothing re-applied mid-switch
+    _tick(p, 1, 13)  # switch complete -> re-assert once
+    assert p._fired == [2]
+    _tick(p, 2, 13)  # keeps printing, no repeat
     assert p._fired == [2]
 
 
-def test_park_within_window_prevents_human_release() -> None:
-    """A park inside the window must stop the human-release clock."""
+def test_wire_jitter_never_mutates_the_pin() -> None:
+    """Per-move speed_mode oscillation must not change or release the pin."""
+    p = _printer()
+    p._pinned_mode = 2  # user set sport
+    # Oscillating wire values across a long printing stretch, no switch.
+    for i in range(40):
+        _tick(p, 1.0, 13, mode=(1 if i % 2 == 0 else 2))
+    assert p._pinned_mode == 2  # not released, not re-learned
+    assert p._fired == []  # no unsolicited re-apply
+
+
+def test_sustained_balanced_without_switch_keeps_pin() -> None:
+    """A long balanced-speed feature (>12s) must NOT release the pin — this
+    was the bug where the old logic mistook it for a human choosing balanced."""
     p = _printer()
     p._pinned_mode = 2
-    _tick(p, 0, 13, 2)
-    _tick(p, 5, 13, 1)  # reset at T=5
-    _tick(p, 4, 27, 1)  # park inside the window -> switch seen
-    _tick(p, 20, 27, 1)  # long switch, we are not printing
-    _tick(p, 1, 13, 1)  # resume -> firmware, re-apply
-    assert p._pinned_mode == 2
-    assert p._fired == [2]
-
-
-# --- human balanced: no switch, pin released ------------------------------
-
-
-def test_human_balanced_releases_pin_after_window() -> None:
-    p = _printer()
-    p._pinned_mode = 2
-    _tick(p, 0, 13, 2)  # printing at sport
-    _tick(p, 2, 13, 1)  # user taps balanced (T=2)
-    _tick(p, 5, 13, 1)  # T=7, no switch, still waiting
+    for _ in range(30):
+        _tick(p, 1.0, 13, mode=1)  # 30s of wire=balanced, no switch
     assert p._pinned_mode == 2
     assert p._fired == []
-    _tick(p, 6, 13, 1)  # still waiting (inside the window)
-    assert p._pinned_mode == 2
-    _tick(p, 5, 13, 1)  # past the window, no switch -> release
-    assert p._pinned_mode is None
-    assert p._fired == []
 
 
-def test_human_balanced_never_yanked_during_window() -> None:
-    """The mode must stay balanced (no enforce) throughout the wait."""
+def test_no_pin_no_reapply_on_switch() -> None:
     p = _printer()
-    p._pinned_mode = 2
-    _tick(p, 0, 13, 2)
-    _tick(p, 1, 13, 1)
-    for _ in range(6):
-        _tick(p, 2, 13, 1)  # poll every 2s up to ~13s
-    assert p._fired == []  # never re-applied sport while adjudicating
-
-
-# --- touchscreen non-balanced override ------------------------------------
-
-
-def test_screen_change_to_nonbalanced_becomes_pin() -> None:
-    p = _printer()
-    _tick(p, 0, 13, 1)  # printing, nothing pinned
-    _tick(p, 5, 13, 3)  # user picks ludicrous on the touchscreen
-    assert p._pinned_mode is None
-    _tick(p, 9, 13, 3)  # held > PIN_LEARN_S -> adopted
-    assert p._pinned_mode == 3
-    assert p._fired == []
-
-
-def test_screen_override_beats_release_when_pinned() -> None:
-    """Screen change sport->ludicrous while sport is pinned: adopt ludicrous,
-    never release or enforce."""
-    p = _printer()
-    p._pinned_mode = 2
-    _tick(p, 0, 13, 2)
-    _tick(p, 2, 13, 3)  # user picks ludicrous
-    _tick(p, 9, 13, 3)  # held -> adopted as new pin
-    assert p._pinned_mode == 3
-    assert p._fired == []
-
-
-# --- lifecycle ------------------------------------------------------------
-
-
-def test_no_pin_no_action() -> None:
-    p = _printer()
-    _tick(p, 0, 13, 1)
-    _tick(p, 60, 13, 1)
+    _tick(p, 0, 13)
+    _tick(p, 5, 27)
+    _tick(p, 60, 13)  # switch completes but nothing is pinned
     assert p._fired == []
     assert p._pinned_mode is None
 
@@ -407,26 +351,22 @@ def test_no_pin_no_action() -> None:
 def test_print_end_clears_pin() -> None:
     p = _printer()
     p._pinned_mode = 2
-    _tick(p, 0, 13, 2)
-    _tick(p, 5, 9, 1)  # completed
+    _tick(p, 0, 13)
+    _tick(p, 5, 9)  # completed
     assert p._pinned_mode is None
-    _tick(p, 5, 13, 1)  # a fresh print at balanced
-    _tick(p, 60, 13, 1)
+    _tick(p, 5, 13)  # a fresh print
+    _tick(p, 5, 27)
+    _tick(p, 5, 13)  # switch completes but pin was cleared
     assert p._fired == []
 
 
-def test_enforce_rate_limited_across_repeated_switches() -> None:
+def test_reapply_only_on_27_to_13_not_other_transitions() -> None:
     p = _printer()
-    p._pinned_mode = 2
-    _tick(p, 0, 13, 2)
-    _tick(p, 3, 13, 1)  # reset
-    _tick(p, 4, 27, 1)  # park
-    _tick(p, 60, 13, 1)  # resume -> enforce (T=67)
-    assert p._fired == [2]
-    _tick(p, 5, 13, 1)  # still balanced (enforce not "taken" in this fake)
-    assert p._fired == [2]  # within 30s cooldown, no repeat
-    _tick(p, 30, 13, 1)  # cooldown elapsed -> enforce again
-    assert p._fired == [2, 2]
+    p._pinned_mode = 3
+    _tick(p, 0, 13)
+    _tick(p, 5, 6)  # paused
+    _tick(p, 5, 13)  # resume from pause (not a switch) -> no re-apply
+    assert p._fired == []
 
 
 # --- HTTP bootstrap error surfacing -------------------------------------------
@@ -456,3 +396,46 @@ async def test_fetch_serial_connect_error_names_lan_only(
     monkeypatch.setattr(httpx, "AsyncClient", _FailClient)
     with pytest.raises(PrinterError, match="LAN Only"):
         await cc2._fetch_serial("192.0.2.1", "code")
+
+
+# --- speed-mode display stabilization (firmware 02.01.00.00 per-move jitter) ---
+
+
+def _sm_payload(speed_mode: int) -> dict[str, Any]:
+    return {"PrintInfo": {"Status": 13}, "_cc2": {"speed_mode": speed_mode}}
+
+
+def test_pin_drives_stable_display_despite_wire_jitter() -> None:
+    p = _printer()
+    p._pinned_mode = 2  # user set sport via pycentauri
+    # The wire oscillates 1/2 every push (per-move value); display must hold sport.
+    for raw in (1, 2, 1, 2, 1, 2):
+        payload = _sm_payload(raw)
+        p._stabilize_speed_mode(payload)
+        assert payload["_cc2"]["speed_mode"] == 2
+        assert payload["PrintInfo"]["PrintSpeedPct"] == 130
+
+
+def test_debounce_holds_display_when_no_pin() -> None:
+    from pycentauri.cc2 import SPEED_DISPLAY_DEBOUNCE_S
+
+    p = _printer()
+    p._pinned_mode = None
+    t = [0.0]
+    p._now = lambda: t[0]
+    # Bootstraps to the first value seen.
+    payload = _sm_payload(2)
+    p._stabilize_speed_mode(payload)
+    assert payload["_cc2"]["speed_mode"] == 2
+    # Fast oscillation never persists the debounce window → display stays at 2.
+    for i in range(8):
+        t[0] += 1.0
+        payload = _sm_payload(1 if i % 2 == 0 else 2)
+        p._stabilize_speed_mode(payload)
+        assert payload["_cc2"]["speed_mode"] == 2
+    # A value that DOES persist past the window is adopted.
+    for _ in range(int(SPEED_DISPLAY_DEBOUNCE_S) + 2):
+        t[0] += 1.0
+        payload = _sm_payload(3)
+        p._stabilize_speed_mode(payload)
+    assert payload["_cc2"]["speed_mode"] == 3

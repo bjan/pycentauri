@@ -144,14 +144,15 @@ actually accepts. We have probed and confirmed which work.
 | 403 | `CHANGE_PRINT_PARAMS` (speed) | `{"PrintSpeedPct": <int>}` | `Ack=0`; `Status.PrintInfo.PrintSpeedPct` updates on next push |
 | 403 | `CHANGE_PRINT_PARAMS` (fans)  | `{"TargetFanSpeed": {"ModelFan": <0..100>, "BoxFan": <0..100>, "AuxiliaryFan": <0..100>}}` | `Ack=0`; fans physically respond within ~1s |
 | 403 | `CHANGE_PRINT_PARAMS` (temps) | `{"TempTargetNozzle": <°C>, "TempTargetHotbed": <°C>, "TempTargetBox": <°C>}` | `Ack=0`; heaters engage and `TempTarget*` updates on next push |
+| 403 | `CHANGE_PRINT_PARAMS` (light) | `{"LightStatus": {"SecondLight": <0\|1>}}` | chamber light toggles; `LightStatus.SecondLight` updates on next push. Verified live on V0.3.0-o 2026-07-14 (SDK had `SET_LIGHT` -> 403 commented out). |
 | 512 | `SUBSCRIBE`             | `{"TimePeriod": <ms>}` | `Ack=0`, then status pushes |
 
-The three `Cmd 403` payload shapes are dispatched by the firmware based
-on which keys are present. You can include only the fields you want to
+The `Cmd 403` payload shapes are dispatched by the firmware based on
+which keys are present. You can include only the fields you want to
 change — e.g. `{"TargetFanSpeed": {"ModelFan": 50}}` adjusts the model
-fan without disturbing the others. Verified live on V0.3.0-o on
-2026-06-03 (fan visibly spun, nozzle heated, speed pct reflected on
-push). `pycentauri.Printer.set_print_speed/set_fan_speed/set_temperatures`
+fan without disturbing the others. Verified live on V0.3.0-o
+(fan/temp/speed 2026-06-03; light 2026-07-14).
+`pycentauri.Printer.set_print_speed/set_fan_speed/set_temperatures/set_light`
 wrap each variant with safety-bound input validation.
 
 ### Confirmed-broken on V1.1.46 *and* V0.3.0-o (OpenCentauri)
@@ -167,11 +168,14 @@ one-Cmd-per-connection plus a `Cmd 0` sanity check after.
 
 | Cmd | Name | Notes |
 |---|---|---|
-| 258  | `GET_FILE_LIST` (CC code)  | No response, then daemon crash |
-| 1044 | `GET_FILE_LIST` (cc2 code) | Same — both Elegoo SDK variants commented out |
-| 320  | `PRINT_TASK_LIST`          | Same |
-| 1036 | `PRINT_TASK_LIST` (cc2)    | Same |
-| 1048 | `GET_DISK_INFO`            | Same |
+| 258  | `GET_FILE_LIST` (CC1)  | No response, then daemon crash |
+| 320  | `PRINT_TASK_LIST` (CC1) | Same |
+
+Note: the CC2 equivalents (methods 1036, 1044, 1047, 1048) were
+initially non-responsive on firmware 01.03.02.51 and listed here as
+broken. They are **confirmed working on firmware 02.01.00.00** — see
+the "Listing and deleting" section under "File transfer" for the
+full method table and param shapes.
 
 OpenCentauri did **not** patch the SDCP daemon — it's the same
 unmodified Elegoo `app` binary, so the broken-Cmd surface is identical
@@ -415,8 +419,57 @@ distinguish synthetic from physical taps.
   full JPEG (`FF D8 ... FF D9`).
 - Single-shot snapshot = open the stream, scan bytes for the SOI
   marker, accumulate until EOI, close the connection.
-- ~10 fps native at 640×360. The HTTP server's `/stream` route just
+- ~10 fps native at 640×360. The HTTP server's `/stream` route
   proxies this stream; the `/snapshot` route is a single-frame grab.
+- **The camera server has very few connection slots and leaks them.**
+  A disconnected client lingers in `FIN-WAIT-2` (the printer never sends
+  its FIN) and keeps holding a slot; once slots are exhausted, new
+  connections receive zero frames. Any connection churn — multiple tabs,
+  page refreshes, per-request proxying — starves the stream (observed
+  live 2026-07-08 on CC1). pycentauri's `/stream` therefore holds one
+  shared upstream connection and fans it out to every browser
+  (`mjpeg_broadcast.CameraBroadcaster`), so the printer only ever sees a
+  single camera connection.
+
+## File transfer (upload / download)
+
+Files move over **HTTP on port 80**, completely separate from the
+SDCP/MQTT control channel — so an upload can never crash a print. Both
+models chunk at **1 MiB** and send the **whole-file MD5** with every
+chunk, but the framing differs. Endpoints and fields reverse-engineered
+from Elegoo's `elegoo-link` SDK (`src/lan/adapters/elegoo_fdm_cc*`);
+pycentauri implements upload in `upload.py`.
+
+| | CC1 | CC2 |
+|---|---|---|
+| Upload | `POST /uploadFile/upload` | `PUT /upload` |
+| Framing | multipart form-data | raw octet-stream body |
+| Per-chunk fields | `Check=1`, `S-File-MD5`, `Offset`, `Uuid`, `TotalSize`, `File` (chunk) | headers `Content-Range: bytes a-b/total`, `X-File-Name`, `X-File-MD5`, `X-Token` (access code) |
+| Success | JSON `{"code": "000000"}` per chunk | HTTP 2xx, JSON `error_code == 0` if a body is returned |
+| Download | `GET /downloadFile<path>` | `GET /download/udisk<path>` |
+
+Uploaded files land in internal storage under the name given, which is
+exactly what `START_PRINT`'s `Filename` expects (`/local/<name>`).
+
+### Listing and deleting (CC2 only, firmware 02.01.00.00+)
+
+On the CC2, four MQTT methods handle file management. They are
+**commented out** in Elegoo's `elegoo-link` SDK but **live on the wire**
+— reverse-engineered by capturing OrcaSlicer's device-tab traffic
+(2026-07-10). The CC1's SDCP Cmd 258 (`GET_FILE_LIST`) is disabled in
+the firmware and cannot be used.
+
+| Method | Name | Params | Response |
+|---|---|---|---|
+| 1044 | `GET_FILE_LIST` | `{"storage_media": "local"\|"u-disk", "offset": 0, "limit": N}` (u-disk adds `"dir": "/"`) | `{"file_list": [{filename, size, create_time, layer, print_time, color_map, total_filament_used, total_print_times, last_print_time, type}], "offset", "total"}` |
+| 1047 | `DELETE_FILE` | `{"storage_media": "local"\|"u-disk", "file_path": ["name1.gcode", ...]}` (array — batch delete) | `{"error_code": 0}` |
+| 1048 | `GET_DISK_INFO` | `{}` | `{"total_bytes": 31021039616, "used_bytes": 23478272}` |
+| 1036 | `PRINT_TASK_LIST` | `{}` | `{"history_task_list": [{task_id, task_name, task_status, begin_time, end_time, ...}]}` |
+
+The key discovery (and why initial probing failed): `GET_FILE_LIST`
+requires `storage_media` (not `path` or `storage`), and `DELETE_FILE`
+takes `file_path` as an **array** of filenames (not a single string).
+Both were found only by capturing Orca's actual requests on the wire.
 
 ## When to suspect firmware/network rather than the library
 
@@ -574,20 +627,23 @@ apart. Observed 2026-07-04 on firmware 01.03.02.51.
 | 1026 | `HOME_AXES` | `{}` | `error_code: 0`, physically homes the axes, triggers 6000 push |
 | 1027 | `MOVE_AXES` | `{"axis":"Z","step":<mm>}` | `error_code: 1003` (may require homing first) |
 | 1028 | `SET_TEMPERATURE` | `{"extruder": <°C>, "heater_bed": <°C>}` | `error_code: 0` |
-| 1029 | `SET_LIGHT` | `{"status": <0\|1>}` | `error_code: 0` |
+| 1029 | `SET_LIGHT` | `{"power": <0\|1>}` | `error_code: 0`. Param is `power` (not `status`), captured from Orca 2026-07-14. Current state reads back as `led.status`. |
 | 1030 | `SET_FAN_SPEED` | `{"fan": <0-255>, "aux_fan": <0-255>, "box_fan": <0-255>}` | `error_code: 0`, fan physically responds |
 | 1031 | `SET_PRINT_SPEED` | `{"mode": <0-3>}` | `error_code: 1010` when idle (expected — only effective mid-print) |
-| 1036 | `PRINT_TASK_LIST` | `{}` | `error_code: 0`, array of `history_task_list` with UUIDs, filenames, timestamps, status |
+| 1036 | `PRINT_TASK_LIST` | `{}` | `error_code: 0`, `history_task_list` with task_id, task_name, task_status, begin/end_time (probed 2026-07-10) |
+| 1042 | `VIDEO_STREAM` | `{}` | `error_code: 0`, `{"url": "http://<ip>:8080/?action=stream"}` (non-responsive on 01.03.02.51; confirmed working on 02.01.00.00, captured from Orca 2026-07-10) |
 | 1043 | `UPDATE_PRINTER_NAME` | (not probed — SDK has it enabled) | — |
+| 1044 | `GET_FILE_LIST` | `{"storage_media": "local"\|"u-disk", "offset": 0, "limit": N}` | `file_list[]` with filename, size, create_time, layer, print_time, color_map. Non-responsive on 01.03.02.51; confirmed on 02.01.00.00, captured from Orca 2026-07-10. See "File transfer" section for full response shape. |
+| 1047 | `DELETE_FILE` | `{"storage_media": "local"\|"u-disk", "file_path": ["name", ...]}` | `error_code: 0`. Batch delete (array). Captured from Orca 2026-07-10. |
+| 1048 | `GET_DISK_INFO` | `{}` | `{"total_bytes", "used_bytes"}`. Probed 2026-07-05; confirmed 2026-07-10. |
+| 1061 | `GET_MONO_FILAMENT` | `{}` | Single-filament-mode info: brand, color, type, temp range. Captured from Orca 2026-07-10. |
 | 2004 | `SET_AUTO_REFILL` | `{"auto_refill": <bool>}` | `error_code: 0`; toggle verified both directions via 2005 read-back (probed 2026-07-04) |
 | 2005 | `GET_CANVAS_STATUS` | `{}` | `error_code: 0`; `canvas_info` with `active_canvas_id`, `active_tray_id` (-1 = none), `auto_refill`, and `canvas_list[].tray_list[]` — each tray has `filament_name/type/color/code`, `brand`, `min/max_nozzle_temp`, `status` (1 = loaded), `tray_id` (probed 2026-07-04 with a 4-slot Canvas attached) |
 
-### Not responding (probed 2026-07-03)
-
-| Method | Name | Notes |
-|---|---|---|
-| 1042 | `VIDEO_STREAM` | No response (timeout). Camera may use a different path. |
-| 1044 | `GET_FILE_LIST` | No response (timeout). May need different params or firmware version. |
+Note: methods 1042, 1044, 1047 were non-responsive on firmware
+01.03.02.51 (probed 2026-07-03). They work on 02.01.00.00. Either
+Elegoo enabled them in the newer firmware or the SDK's commented-out
+status was misleading.
 
 ### Error codes observed
 

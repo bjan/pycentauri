@@ -14,7 +14,7 @@ import contextlib
 import logging
 from collections.abc import AsyncIterator
 from types import TracebackType
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import websockets
 from typing_extensions import Self
@@ -23,6 +23,11 @@ from websockets.asyncio.client import ClientConnection, connect
 from pycentauri import camera as camera_module
 from pycentauri import sdcp
 from pycentauri.models import Attributes, CanvasStatus, Status
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pycentauri import upload as upload_module
 
 log = logging.getLogger(__name__)
 
@@ -236,6 +241,27 @@ class Printer:
         """Return a single JPEG frame from the built-in webcam."""
         return await camera_module.snapshot(self.host, timeout=timeout)
 
+    async def upload_file(
+        self,
+        local_path: str | Path,
+        *,
+        remote_name: str | None = None,
+        timeout: float = 180.0,
+        progress: upload_module.ProgressCallback | None = None,
+    ) -> str:
+        """Upload a file to the printer's internal storage (chunked HTTP).
+
+        Returns the name the file has on the printer, which is what
+        :meth:`start_print` expects. Transfers over HTTP, independent of
+        the SDCP control channel. Requires ``enable_control=True``.
+        """
+        from pycentauri import upload as upload_module
+
+        self._require_control("upload_file")
+        return await upload_module.upload_cc1(
+            self.host, local_path, remote_name=remote_name, timeout=timeout, progress=progress
+        )
+
     async def canvas_status(self) -> CanvasStatus:
         """Return the Canvas multi-filament system state.
 
@@ -256,6 +282,45 @@ class Printer:
         raise PrinterError(
             "Canvas auto-refill is not implemented for the CC1. It currently "
             "requires a Centauri Carbon 2 (MQTT method 2004)."
+        )
+
+    async def list_files(
+        self,
+        storage: str = "local",
+        *,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List files on the printer. CC2 only (MQTT method 1044)."""
+        raise PrinterError(
+            "File listing is not available on the CC1 over SDCP. SDCP Cmd 258 "
+            "(GET_FILE_LIST) is disabled in the firmware. It currently requires "
+            "a Centauri Carbon 2 (MQTT method 1044)."
+        )
+
+    async def delete_files(
+        self,
+        filenames: list[str],
+        storage: str = "local",
+    ) -> dict[str, Any]:
+        """Delete files from the printer. CC2 only (MQTT method 1047)."""
+        raise PrinterError(
+            "File deletion is not available on the CC1 over SDCP. It currently "
+            "requires a Centauri Carbon 2 (MQTT method 1047)."
+        )
+
+    async def disk_info(self) -> dict[str, Any]:
+        """Return disk usage. CC2 only (MQTT method 1048)."""
+        raise PrinterError(
+            "Disk info is not available on the CC1 over SDCP. It currently "
+            "requires a Centauri Carbon 2 (MQTT method 1048)."
+        )
+
+    async def print_history(self, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
+        """Return print history. CC2 only (MQTT method 1036)."""
+        raise PrinterError(
+            "Print history is not available on the CC1 over SDCP. It currently "
+            "requires a Centauri Carbon 2 (MQTT method 1036)."
         )
 
     # --- control actions (gated) ----------------------------------------------
@@ -405,6 +470,23 @@ class Printer:
             raise ValueError("at least one temperature target must be specified")
         mid = await self.wait_for_mainboard()
         return await self._request(sdcp.Cmd.CHANGE_PRINT_PARAMS, targets, mid)
+
+    async def set_light(self, on: bool) -> sdcp.ParsedMessage:
+        """Turn the chamber light on or off.
+
+        Sent as ``Cmd 403`` (CHANGE_PRINT_PARAMS) with
+        ``{"LightStatus": {"SecondLight": 0|1}}`` — verified live on
+        V0.3.0-o 2026-07-14. Cmd 403 is a confirmed-working command, so
+        this is safe mid-print. Current state reads back as
+        ``LightStatus.SecondLight``.
+        """
+        self._require_control("set_light")
+        mid = await self.wait_for_mainboard()
+        return await self._request(
+            sdcp.Cmd.CHANGE_PRINT_PARAMS,
+            {"LightStatus": {"SecondLight": 1 if on else 0}},
+            mid,
+        )
 
     # --- lifecycle -------------------------------------------------------------
 

@@ -175,6 +175,28 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
     # --- Control tools (registered only when explicitly enabled) --------------
 
     @mcp.tool()
+    async def upload_file(
+        local_path: str,
+        remote_name: str | None = None,
+        start: bool = False,
+    ) -> dict[str, Any]:
+        """Upload a local file to the printer's internal storage (chunked HTTP).
+
+        ``local_path`` is a path on this machine (where the MCP server runs).
+        Returns the name the file has on the printer, which ``start_print``
+        expects. Set ``start=True`` to begin printing it immediately —
+        DESTRUCTIVE, ask the user first if so. Transfers over HTTP,
+        independent of the control channel.
+        """
+        async with await _open(enable_control=True) as printer:
+            remote = await printer.upload_file(local_path, remote_name=remote_name)
+            result: dict[str, Any] = {"ok": True, "filename": remote}
+            if start:
+                started = await printer.start_print(remote)
+                result["start_response"] = started.inner
+        return result
+
+    @mcp.tool()
     async def start_print(
         filename: str,
         storage: str = "local",
@@ -262,6 +284,13 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         return {"ok": True, "response": result.inner}
 
     @mcp.tool()
+    async def set_light(on: bool) -> dict[str, Any]:
+        """Turn the chamber light on (True) or off (False). CC2 only."""
+        async with await _open(enable_control=True) as printer:
+            result = await printer.set_light(on)
+        return {"ok": True, "response": result.inner}
+
+    @mcp.tool()
     async def set_auto_refill(enabled: bool) -> dict[str, Any]:
         """Toggle Canvas auto-refill (CC2 only).
 
@@ -271,6 +300,47 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         async with await _open(enable_control=True) as printer:
             result = await printer.set_auto_refill(enabled)
         return {"ok": True, "response": result.inner}
+
+    @mcp.tool()
+    async def list_files(
+        storage: str = "local",
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List files on the printer (CC2 only).
+
+        ``storage`` is ``"local"`` (internal) or ``"u-disk"`` (USB).
+        Returns ``file_list`` (filename, size, layers, print time, colors)
+        plus ``total`` and ``offset`` for pagination.
+        """
+        async with await _open() as printer:
+            return await printer.list_files(storage, offset=offset, limit=limit)
+
+    @mcp.tool()
+    async def delete_files(
+        filenames: list[str],
+        storage: str = "local",
+    ) -> dict[str, Any]:
+        """DESTRUCTIVE. Delete file(s) from the printer (CC2 only).
+
+        ``filenames`` is a list of names as returned by ``list_files``.
+        Ask the user for confirmation before invoking.
+        """
+        async with await _open(enable_control=True) as printer:
+            result = await printer.delete_files(filenames, storage=storage)
+        return {"ok": True, "deleted": filenames, "response": result}
+
+    @mcp.tool()
+    async def disk_info() -> dict[str, Any]:
+        """Return disk usage (CC2 only): total_bytes and used_bytes."""
+        async with await _open() as printer:
+            return await printer.disk_info()
+
+    @mcp.tool()
+    async def print_history() -> dict[str, Any]:
+        """Return print job history (CC2 only)."""
+        async with await _open() as printer:
+            return await printer.print_history()
 
     return mcp
 

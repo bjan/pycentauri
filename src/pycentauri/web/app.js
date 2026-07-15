@@ -146,10 +146,12 @@ function renderStatus(raw) {
   }
   sc.textContent = (pstatus != null) ? String(pstatus).padStart(2, "0") : "--";
 
-  // Layer
-  $("layer").textContent = (pi.CurrentLayer != null && pi.TotalLayer)
-    ? `${pi.CurrentLayer} / ${pi.TotalLayer}`
-    : "—";
+  // Layer — show current even when the total is unknown (the CC2's status
+  // has no total-layer field; it's filled from file metadata when available).
+  $("layer").textContent =
+    pi.CurrentLayer == null ? "—"
+    : pi.TotalLayer ? `${pi.CurrentLayer} / ${pi.TotalLayer}`
+    : `${pi.CurrentLayer}`;
 
   // Times (CurrentTicks / TotalTicks are seconds on CC firmware)
   const elapsed = pi.CurrentTicks;
@@ -161,6 +163,7 @@ function renderStatus(raw) {
   // Speed %
   $("speed").textContent = (pi.PrintSpeedPct != null) ? `${pi.PrintSpeedPct}%` : "—";
   reflectSpeedMode(pi.PrintSpeedPct);
+  reflectLight(raw);
 
   // Hydrate ADJUST controls from live values + retune poll cadence.
   hydrateAdjust(raw);
@@ -284,6 +287,33 @@ async function doAction(label, path, confirmMsg) {
   }
 }
 
+async function doUpload() {
+  const input = $("upload-file");
+  const file = input?.files?.[0];
+  if (!file) { setMsg("Choose a file to upload first.", "warn"); return; }
+  const start = $("upload-start")?.checked;
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  fd.append("start", start ? "true" : "false");
+
+  const btns = document.querySelectorAll(".controls button");
+  for (const b of btns) b.disabled = true;
+  // The browser->server leg is fast on a LAN; the slow, invisible part is
+  // the server chunking to the printer. Show an honest indeterminate state.
+  setMsg(`» uploading ${file.name}…`);
+  try {
+    const r = await fetch("/files/upload", { method: "POST", body: fd });
+    if (!r.ok) throw new Error(`HTTP ${r.status} — ${await r.text()}`);
+    const data = await r.json();
+    setMsg(`✓ uploaded ${data.filename}${start ? " — print started" : ""}`, "ok");
+    input.value = "";
+  } catch (e) {
+    setMsg(`✗ upload: ${e.message}`, "err");
+  } finally {
+    for (const b of btns) b.disabled = false;
+  }
+}
+
 function wireControls() {
   $("btn-pause")?.addEventListener("click", () =>
     doAction("PAUSE", "/print/pause", "Pause the current print?")
@@ -295,6 +325,7 @@ function wireControls() {
     doAction("STOP", "/print/stop",
       "Stop the current print?\n\nThis cannot be undone.")
   );
+  $("btn-upload")?.addEventListener("click", doUpload);
 
   // Keyboard shortcuts when controls are visible.
   document.addEventListener("keydown", (ev) => {
@@ -464,6 +495,36 @@ function wireAdjust() {
   for (const btn of document.querySelectorAll("#adj-speed-modes .adj-mode")) {
     btn.addEventListener("click", () => applySpeedMode(btn.dataset.mode));
   }
+  for (const btn of document.querySelectorAll("#adj-light .adj-light")) {
+    btn.addEventListener("click", () => applyLight(btn.dataset.light === "on"));
+  }
+}
+
+async function applyLight(on) {
+  const btns = document.querySelectorAll("#adj-light .adj-light");
+  for (const b of btns) b.disabled = true;
+  try {
+    const r = await fetch("/light", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status} — ${await r.text()}`);
+    setAdjMsg(`✓ LIGHT → ${on ? "ON" : "OFF"} acknowledged`, "ok");
+  } catch (e) {
+    setAdjMsg(`✗ LIGHT: ${e.message}`, "err");
+  } finally {
+    setTimeout(() => { for (const b of btns) b.disabled = false; }, 600);
+  }
+}
+
+// Highlight the active light state from the live status (LightStatus.SecondLight).
+function reflectLight(raw) {
+  const on = raw && raw.LightStatus && raw.LightStatus.SecondLight;
+  const btnOn = document.querySelector('#adj-light [data-light="on"]');
+  const btnOff = document.querySelector('#adj-light [data-light="off"]');
+  if (btnOn) btnOn.classList.toggle("active", !!on);
+  if (btnOff) btnOff.classList.toggle("active", !on);
 }
 
 // ---------------------------------------------------------------------------

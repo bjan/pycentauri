@@ -282,6 +282,53 @@ def cmd_snapshot(
     _run(run())
 
 
+@app.command("upload")
+def cmd_upload(
+    file: Annotated[Path, typer.Argument(help="Local file to upload (e.g. a .gcode).")],
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+    name: Annotated[
+        str | None, typer.Option("--name", help="Name on the printer (default: the file's name).")
+    ] = None,
+    start: Annotated[
+        bool, typer.Option("--start", help="Start printing the file once uploaded.")
+    ] = False,
+    timeout: float = typer.Option(180.0, "--timeout", "-t"),
+) -> None:
+    """Upload a file to the printer's internal storage (chunked HTTP)."""
+    if not enable_control:
+        _echo_err("Refusing to upload without --enable-control.")
+        raise typer.Exit(code=2)
+    if not file.is_file():
+        _echo_err(f"not a file: {file}")
+        raise typer.Exit(code=2)
+
+    total = file.stat().st_size
+    last_pct = -1
+
+    def on_progress(sent: int, tot: int) -> None:
+        nonlocal last_pct
+        pct = int(sent * 100 / tot) if tot else 100
+        if pct != last_pct:
+            last_pct = pct
+            typer.echo(f"\ruploading {file.name}: {pct}% ({sent}/{tot} bytes)", nl=False)
+
+    async def run() -> None:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
+            remote = await printer.upload_file(
+                file, remote_name=name, timeout=timeout, progress=on_progress
+            )
+            typer.echo(f"\nuploaded as {remote!r} ({total} bytes)")
+            if start:
+                result = await printer.start_print(remote)
+                typer.echo(f"start_print sent; response: {result.inner}")
+
+    _run(run())
+
+
 @print_cmd.command("start")
 def cmd_print_start(
     filename: Annotated[str, typer.Argument(help="File name as it appears on the printer.")],
@@ -521,6 +568,32 @@ def cmd_canvas(
     _run(run())
 
 
+@app.command("light")
+def cmd_light(
+    state: Annotated[str, typer.Argument(help="'on' or 'off'.")],
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+) -> None:
+    """Turn the chamber light on or off (CC2 only)."""
+    key = state.strip().lower()
+    if key not in ("on", "off"):
+        _echo_err("state must be 'on' or 'off'.")
+        raise typer.Exit(code=2)
+    if not enable_control:
+        _echo_err("Refusing to send a write action without --enable-control.")
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
+            await printer.set_light(key == "on")
+        typer.echo(f"light {key}")
+
+    _run(run())
+
+
 @app.command("refill")
 def cmd_refill(
     on: Annotated[bool, typer.Option("--on/--off", help="Enable or disable auto-refill.")] = True,
@@ -539,6 +612,108 @@ def cmd_refill(
         ) as printer:
             await printer.set_auto_refill(on)
         typer.echo(f"auto-refill {'enabled' if on else 'disabled'}")
+
+    _run(run())
+
+
+@app.command("files")
+def cmd_files(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    storage: str = typer.Option("local", "--storage", help="'local' or 'u-disk'."),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max files to return."),
+    as_json: JsonOpt = False,
+) -> None:
+    """List files on the printer (CC2 only)."""
+
+    async def run() -> None:
+        async with await _open_printer(host, access_code=access_code) as printer:
+            result = await printer.list_files(storage, limit=limit)
+        if as_json:
+            typer.echo(json.dumps(result, indent=2, default=str))
+        else:
+            files = result.get("file_list", [])
+            total = result.get("total", len(files))
+            typer.echo(f"{total} file(s) on {storage}:\n")
+            for f in files:
+                size_mb = f.get("size", 0) / 1_048_576
+                layers = f.get("layer", 0)
+                typer.echo(f"  {f['filename']:<50s}  {size_mb:6.1f} MB  {layers:>4d} layers")
+
+    _run(run())
+
+
+@app.command("delete")
+def cmd_delete(
+    filenames: Annotated[list[str], typer.Argument(help="File name(s) to delete.")],
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    enable_control: ControlOpt = False,
+    storage: str = typer.Option("local", "--storage", help="'local' or 'u-disk'."),
+) -> None:
+    """Delete file(s) from the printer (CC2 only)."""
+    if not enable_control:
+        _echo_err("Refusing to delete without --enable-control.")
+        raise typer.Exit(code=2)
+
+    async def run() -> None:
+        async with await _open_printer(
+            host, enable_control=True, access_code=access_code
+        ) as printer:
+            await printer.delete_files(filenames, storage=storage)
+        for f in filenames:
+            typer.echo(f"deleted: {f}")
+
+    _run(run())
+
+
+@app.command("disk")
+def cmd_disk(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Show disk usage (CC2 only)."""
+
+    async def run() -> None:
+        async with await _open_printer(host, access_code=access_code) as printer:
+            result = await printer.disk_info()
+        if as_json:
+            typer.echo(json.dumps(result, indent=2, default=str))
+        else:
+            total = result.get("total_bytes", 0)
+            used = result.get("used_bytes", 0)
+            free = total - used
+            pct = f"{used * 100 / total:.1f}%" if total else "?"
+            typer.echo(
+                f"total: {total / 1e9:.1f} GB  used: {used / 1e6:.1f} MB  "
+                f"free: {free / 1e9:.1f} GB  ({pct} used)"
+            )
+
+    _run(run())
+
+
+@app.command("history")
+def cmd_history(
+    host: HostOpt = None,
+    access_code: AccessCodeOpt = None,
+    as_json: JsonOpt = False,
+) -> None:
+    """Show print history (CC2 only)."""
+
+    async def run() -> None:
+        async with await _open_printer(host, access_code=access_code) as printer:
+            result = await printer.print_history()
+        if as_json:
+            typer.echo(json.dumps(result, indent=2, default=str))
+        else:
+            tasks = result.get("history_task_list", [])
+            typer.echo(f"{len(tasks)} task(s):\n")
+            for t in tasks:
+                status = {0: "running", 1: "paused", 2: "stopped", 3: "completed"}.get(
+                    t.get("task_status", -1), f"status={t.get('task_status')}"
+                )
+                typer.echo(f"  {t.get('task_name', '?'):<50s}  {status}")
 
     _run(run())
 

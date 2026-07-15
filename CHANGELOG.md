@@ -6,6 +6,84 @@ Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-14
+
+### Fixed
+- **CC2 speed mode no longer flips, and the pin no longer misfires on
+  firmware 02.01.00.00.** The newer firmware streams
+  `gcode_move.speed_mode` in its real-time (method 6000) pushes as the
+  *current gcode move's* speed factor, which oscillates 1↔2 as the head
+  runs different features — it is no longer the stable "set" mode the
+  older firmware exposed. This caused two problems: the UI flipped
+  ~1×/sec, and the old wire-observation pin logic mistook a long
+  balanced-speed feature stretch for a human choosing balanced and
+  **spuriously released the pin** (and could re-learn/re-apply the wrong
+  mode). The speed pin is now **explicit only**: set via
+  `set_print_speed`, re-applied once when a Canvas filament switch
+  completes (the point the firmware historically reset it — harmless if
+  already correct), and cleared when the print ends. pycentauri never
+  infers or sends a speed command from wire observation. The displayed
+  mode reflects the pin (or a debounced wire value when unpinned), so it
+  stays stable. Backward compatible: the switch-completion re-apply
+  covers the older firmware's post-switch reset without depending on the
+  wire value.
+- **CC2 web UI now shows the current layer.** The CC2's status payload
+  has no total-layer field (only `current_layer`), so the UI — which
+  required both — showed nothing. `CC2Printer` now looks up the printing
+  file's layer count from its metadata (method 1044) once per file and
+  caches it, so the UI shows "layer N / total". The layer also renders
+  with just the current number when the total isn't yet known.
+- **Webcam no longer stalls after a second / on refresh.** The printer's
+  MJPEG camera server has very few connection slots and releases them
+  badly (closed connections linger in `FIN-WAIT-2`, still holding a
+  slot). The old `/stream` opened a fresh upstream connection per request
+  — every tab, and every client-side reload — which exhausted the slots
+  and starved the stream (observed live 2026-07-08 on CC1: a sole fresh
+  client got zero frames). `/stream` now shares a **single** upstream
+  connection across all browsers via a `CameraBroadcaster`, so the
+  printer only ever sees one camera connection regardless of tabs,
+  refreshes, or reloads. Verified live: 4 concurrent clients → 1 printer
+  connection, ~10 fps sustained, no connection pileup.
+- The camera broadcaster detects a stale upstream (TCP alive but no
+  frames for 15 s) and reconnects automatically, instead of silently
+  hanging forever (observed 2026-07-09 on CC1).
+
+
+### Added
+- **File management (CC2, firmware 02.01.00.00+).** Four new MQTT methods
+  reverse-engineered from Orca's live wire traffic (2026-07-10):
+  - `list_files(storage, offset=, limit=)` — method 1044, params
+    `{"storage_media": "local"|"u-disk", "offset", "limit"}`. Returns
+    `file_list` with filename, size, create_time, layers, print_time,
+    color_map, total_filament_used. Surfaced as `centauri files`,
+    `GET /files`, and MCP `list_files`.
+  - `delete_files(filenames, storage=)` — method 1047, params
+    `{"storage_media", "file_path": [...]}` (batch delete, array of
+    names). Surfaced as `centauri delete`, `POST /files/delete`, and
+    MCP `delete_files`. Requires `enable_control`.
+  - `disk_info()` — method 1048. Returns `total_bytes`, `used_bytes`.
+    Surfaced as `centauri disk`, `GET /disk`, and MCP `disk_info`.
+  - `print_history()` — method 1036. Returns `history_task_list`.
+    Surfaced as `centauri history`, `GET /history`, and MCP
+    `print_history`.
+  All four are CC2-only; CC1 raises `PrinterError` (SDCP Cmd 258 for
+  file listing is disabled in the firmware). Full upload-list-delete
+  cycle verified live on CC2.
+- **Chamber light on/off (both models).** `set_light(on)` — surfaced as
+  `centauri light on|off`, `POST /light`, MCP `set_light`, and a Light
+  toggle in the web UI. Requires `enable_control`. CC2 uses MQTT method
+  1029 `{"power": 0|1}` (captured from Orca's wire traffic); CC1 uses
+  SDCP `Cmd 403` `{"LightStatus": {"SecondLight": 0|1}}` (verified live
+  on V0.3.0-o). Both field names were commented out in Elegoo's SDK.
+- **File upload across every surface.** `upload_file()` pushes a local
+  file to the printer's internal storage over chunked HTTP (port 80),
+  independent of the control channel. CC1 uses multipart
+  `POST /uploadFile/upload`; CC2 uses `PUT /upload` with Content-Range
+  + `X-Token`. Surfaced as `centauri upload` (with `--start`),
+  `POST /files/upload` (multipart), MCP `upload_file`, and a web UI
+  upload control. Requires `enable_control`. Verified live on CC2.
+
+
 ## [0.6.5] - 2026-07-06
 
 ### Fixed

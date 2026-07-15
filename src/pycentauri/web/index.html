@@ -59,6 +59,11 @@
           <button id="btn-resume" class="btn ok" type="button">Resume</button>
           <button id="btn-stop" class="btn danger" type="button">Stop</button>
         </div>
+        <div class="upload-row">
+          <input type="file" id="upload-file" class="upload-input">
+          <label class="upload-chk"><input type="checkbox" id="upload-start"> start</label>
+          <button id="btn-upload" class="btn" type="button">Upload</button>
+        </div>
         <div class="ctrl-msg" id="ctrl-msg" aria-live="polite"></div>
       </div>
 
@@ -79,6 +84,12 @@
           <button class="btn adj-mode" data-mode="ludicrous" type="button">
             <small>160%</small> Ludicrous
           </button>
+        </div>
+
+        <div class="adj-sub">Light</div>
+        <div class="adj-modes light-row" id="adj-light">
+          <button class="btn adj-light" data-light="on" type="button">On</button>
+          <button class="btn adj-light" data-light="off" type="button">Off</button>
         </div>
 
         <div class="adj-sub">Fans</div>

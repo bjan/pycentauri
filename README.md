@@ -19,6 +19,7 @@ to and speaks the right protocol:
 | Live head speed | — | ✓ (`gcode_move.speed` ÷ 60 = the screen's mm/s readout) |
 | Fan channels | 3 | 5 |
 | Canvas multi-filament | — | ✓ (status + auto-refill) |
+| File management | upload only | ✓ (list, delete, disk info, history) |
 | Filament-switch detection | — | ✓ (position-based) |
 
 > **Status:** alpha, but used daily against real printers. Protocols were
@@ -78,16 +79,31 @@ centauri attributes --host 192.168.1.209
 centauri watch      --host 192.168.1.209
 centauri snapshot   --host 192.168.1.209 shot.jpg
 
-# Print control — all writes require --enable-control
-centauri print start cube.gcode --host 192.168.1.209 --enable-control
-centauri print pause            --host 192.168.1.209 --enable-control
-centauri print resume           --host 192.168.1.209 --enable-control
-centauri print stop             --host 192.168.1.209 --enable-control
+# Upload a file, then print it — all writes require --enable-control
+centauri upload model.gcode         --host 192.168.1.209 --enable-control
+centauri upload model.gcode --start --host 192.168.1.209 --enable-control
+
+# Print control
+centauri print start model.gcode --host 192.168.1.209 --enable-control
+centauri print pause             --host 192.168.1.209 --enable-control
+centauri print resume            --host 192.168.1.209 --enable-control
+centauri print stop              --host 192.168.1.209 --enable-control
 
 # Live adjust while printing
 centauri speed sport                            --host 192.168.1.209 --enable-control
 centauri fan  --model 100 --aux 60 --chamber 30 --host 192.168.1.209 --enable-control
 centauri temp --nozzle 215 --bed 60             --host 192.168.1.209 --enable-control
+
+# File management (CC2 only — CC1 lacks the LAN endpoints)
+centauri files        --host 192.168.1.189 --access-code Ab3dEf
+centauri files --storage u-disk --host 192.168.1.189 --access-code Ab3dEf
+centauri disk         --host 192.168.1.189 --access-code Ab3dEf
+centauri history      --host 192.168.1.189 --access-code Ab3dEf
+centauri delete old.gcode --host 192.168.1.189 --access-code Ab3dEf --enable-control
+
+# Chamber light (both models)
+centauri light on   --host 192.168.1.189 --access-code Ab3dEf --enable-control
+centauri light off  --host 192.168.1.189 --access-code Ab3dEf --enable-control
 
 # Canvas multi-filament (CC2 only)
 centauri canvas       --host 192.168.1.189 --access-code Ab3dEf
@@ -123,38 +139,25 @@ are silently ignored by the firmware:
 
 Speed changes only take effect while a print is actively running.
 
-#### CC2 speed pinning (the firmware fights you, so pycentauri fights back)
+#### CC2 speed pinning
 
-The CC2 firmware **resets the speed mode back to balanced on every
-Canvas filament switch.** On a multi-color print that switch happens
-every couple of minutes, so set sport once and the printer quietly
-drops you to balanced at the next color change. This is firmware
-behavior; it happens whether you set the speed from pycentauri or from
-the printer's own touchscreen.
+Historically the CC2 firmware reset the speed mode back to balanced on
+every Canvas filament switch, losing your choice. pycentauri works
+around it by **pinning** the mode you set and re-applying it when a
+filament switch completes (CC2 only, requires `--enable-control`):
 
-pycentauri works around it with **pin-and-enforce** (CC2 only, requires
-`--enable-control`):
+- The mode you set via pycentauri is *pinned*.
+- When a Canvas filament switch finishes, the pinned mode is re-applied
+  once (harmless if the firmware didn't reset it).
+- The pin clears when the print ends.
 
-- **Whatever mode you select gets pinned.** Set it via pycentauri (pins
-  immediately) or on the touchscreen (pinned after it holds ~8 seconds —
-  the firmware never *resets* to a non-balanced mode, so a sustained
-  sport/ludicrous/silent must be a human).
-- **A firmware reset is re-applied.** The reset fires a few seconds
-  *before* the head parks at the chute, so when the speed drops to
-  balanced pycentauri waits to see what follows: a filament switch
-  (the head parking) within ~12 seconds means it was the firmware, and
-  the pinned mode is re-applied as soon as the switch completes.
-- **A human's balanced is honored.** If the speed drops to balanced and
-  *no* switch follows within ~12 seconds, that was you tapping balanced
-  on the touchscreen — the pin is released and balanced stays. (On the
-  wire a human tap is byte-identical to a firmware reset; the presence
-  or absence of the following switch is what tells them apart. Measured
-  reset→park lead times cluster at 6–8 s, well inside the window.)
-- **The pin clears when the print ends.**
-
-So both paths just work: set any speed from either the app or the
-printer and it sticks across filament switches, and you can always
-drop back to balanced from the touchscreen whenever you want.
+A note on firmware: on **02.01.00.00** the printer no longer exposes a
+stable "set speed mode" over the wire — `gcode_move.speed_mode` in the
+real-time stream is the *current move's* speed factor, which varies per
+feature. pycentauri therefore treats the pin as an explicit setting and
+never infers or enforces it from that noisy value; it only re-applies
+your pinned mode on switch completion. To change speed, set it through
+pycentauri (the dashboard, `centauri speed`, etc.).
 
 The CC1 has none of this — its speed mode stays where you put it, so
 `set_print_speed` is a plain one-shot there.
@@ -190,12 +193,21 @@ asyncio.run(main())
 ```
 
 Both classes expose the same API: `status()`, `attributes()`, `watch()`
-(async iterator of live status), `snapshot()`, `start_print()`, `pause()`,
-`resume()`, `stop()`, `set_print_speed()`, `set_fan_speed()`,
-`set_temperatures()`, `canvas_status()`, `set_auto_refill()`. Write
-methods require `enable_control=True` at connect time and raise
-`ControlDisabledError` otherwise. Canvas methods raise `PrinterError` on
-CC1 (no Canvas support over SDCP).
+(async iterator of live status), `snapshot()`, `upload_file()`,
+`start_print()`, `pause()`, `resume()`, `stop()`, `set_print_speed()`,
+`set_fan_speed()`, `set_temperatures()`, `set_light()`, `list_files()`,
+`delete_files()`, `disk_info()`, `print_history()`, `canvas_status()`,
+`set_auto_refill()`. Write methods require `enable_control=True` at
+connect time and raise `ControlDisabledError` otherwise. File
+management and Canvas methods raise `PrinterError` on CC1 (not
+available over SDCP).
+
+`upload_file(local_path, *, remote_name=None, progress=None)` pushes a
+file to the printer's internal storage over chunked HTTP (independent of
+the control channel, so it can't disrupt a print) and returns the name
+`start_print()` expects — so the typical flow is `await
+p.upload_file("model.gcode")` then `await p.start_print(...)`. The
+optional `progress` callback receives `(bytes_sent, total_bytes)`.
 
 CC2-only telemetry rides along in `Status.raw["_cc2"]`: the live head
 speed (`gcode_move_speed` — the commanded speed of the current move in
@@ -252,6 +264,12 @@ with `--enable-control`.
 | `POST` | `/print/speed` | `{"mode": "sport"}` or `{"mode": 130}` † |
 | `POST` | `/print/fan` | `{"model": 50, "auxiliary": 30, "chamber": 0}` — any subset, 0–100 † |
 | `POST` | `/print/temperature` | `{"nozzle": 215, "bed": 60}` — any subset, °C, 0 = off † |
+| `POST` | `/files/upload` | multipart `file=@model.gcode` (+ optional `start=true`) † |
+| `POST` | `/files/delete` | `{"filenames": ["a.gcode"], "storage": "local"}` (CC2) † |
+| `GET` | `/files` | `?storage=local&limit=100` — file list (CC2) |
+| `GET` | `/disk` | Disk usage: `total_bytes`, `used_bytes` (CC2) |
+| `GET` | `/history` | Print job history (CC2) |
+| `POST` | `/light` | `{"on": true}` — chamber light (CC2) † |
 | `POST` | `/canvas/refill` | `{"enabled": true}` (CC2) † |
 | `GET` | `/api/rtsp` | RTSP bridge state (when `--rtsp`) |
 | `POST` | `/api/rtsp/start` · `/api/rtsp/stop` | Toggle the bridge (when `--rtsp`) |

@@ -19,7 +19,7 @@ import logging
 import random
 import time
 from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import paho.mqtt.client as mqtt
 from typing_extensions import Self
@@ -35,27 +35,38 @@ from pycentauri.client import (
 )
 from pycentauri.models import Attributes, CanvasStatus, Status
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pycentauri import upload as upload_module
+
 log = logging.getLogger(__name__)
 
 MQTT_PORT = 1883
 CC2_USERNAME = "elegoo"
 PING_INTERVAL_S = 30.0
-# Speed-mode pinning. The firmware resets speed_mode TO balanced (1) — never
-# to any other mode — as the leading edge of every Canvas filament switch:
-# the reset fires a few seconds before the head parks at the chute, while the
-# status still reads "printing". Measured lead times (reset -> park) cluster
-# tightly at 6-10 s (2026-07-05). We exploit that to tell a firmware reset
-# apart from a human tapping "balanced" on the touchscreen (byte-identical on
-# the wire): a drop to balanced followed by a park within HUMAN_WINDOW_S is
-# the firmware and the pinned mode is re-applied when the switch completes;
-# a drop that sits at balanced for HUMAN_WINDOW_S with NO switch is a human,
-# and the pin is released. 12 s is ~1.5x the 8 s max lead time from the
-# precise (sub-second) captures on 2026-07-05. A non-balanced mode from the
-# touchscreen (held PIN_LEARN_S) is adopted as the new pin outright, since
-# the firmware never produces one.
-PIN_LEARN_S = 8.0
-HUMAN_WINDOW_S = 12.0
-ENFORCE_MIN_INTERVAL_S = 30.0
+_SPEED_MODE_TO_PCT = {0: 50, 1: 100, 2: 130, 3: 160}
+# On firmware 02.01.00.00 the 6000 real-time pushes report gcode_move.speed_mode
+# as the *current move's* speed factor, which oscillates 1/2 every push as the
+# head runs different features — it is no longer the stable "set" mode the older
+# firmware exposed. Displaying it verbatim makes the UI flip every second. We
+# debounce it: a wire value must persist this long before it becomes the shown
+# mode, and an explicit mode set via pycentauri (the pin) always wins.
+SPEED_DISPLAY_DEBOUNCE_S = 6.0
+# Speed-mode pin. Historically (firmware 01.03.02.51) the firmware reset
+# speed_mode to balanced on every Canvas filament switch, losing the user's
+# choice, so pycentauri re-applied it. That worked because speed_mode was a
+# stable "set" value we could observe and enforce.
+#
+# Firmware 02.01.00.00 changed this: speed_mode in the real-time (6000) push
+# stream is now the *current move's* speed factor, oscillating per feature —
+# it is no longer a stable setting we can read. So we no longer infer or
+# enforce anything from the wire. The pin is purely explicit: set via
+# set_print_speed, re-applied once when a filament switch completes (the
+# point the firmware used to reset it — harmless if already correct on newer
+# firmware), and cleared when the print ends. pycentauri never sends an
+# unsolicited speed command based on wire observation.
+#
 # Lifecycle commands (start/pause/stop/resume) are answered only after the
 # firmware finishes the mechanical sequence — a resume reheats and unparks
 # before responding, easily exceeding the default 15 s request timeout
@@ -96,8 +107,7 @@ def _cc2_status_to_cc1(result: dict[str, Any]) -> dict[str, Any]:
         "HeaterFan": int(fans_raw.get("heater_fan", {}).get("speed", 0)),
     }
 
-    speed_mode_to_pct: dict[int, int] = {0: 50, 1: 100, 2: 130, 3: 160}
-    speed_pct = speed_mode_to_pct.get(gm.get("speed_mode", 1), 100)
+    speed_pct = _SPEED_MODE_TO_PCT.get(gm.get("speed_mode", 1), 100)
 
     x = gm.get("x", 0.0)
     y = gm.get("y", 0.0)
@@ -281,17 +291,21 @@ class CC2Printer(Printer):
         self._last_full_result: dict[str, Any] | None = None
         self._connect_error: str | None = None
         self._ping_task: asyncio.Task[None] | None = None
-        # Speed-mode pinning (see module constants for the rationale).
+        # Speed-mode pin (see module constants). Explicit: set only via
+        # set_print_speed, re-applied when a filament switch completes.
         self._pinned_mode: int | None = None
-        self._pin_candidate: int | None = None
-        self._pin_candidate_since: float = 0.0
-        # Adjudicating a drop-to-balanced: when it started, and whether a
-        # filament switch (a park at the chute) has been seen since.
-        self._pending_since: float | None = None
-        self._switch_seen: bool = False
-        self._last_enforce: float = float("-inf")
+        self._prev_print_status: int | None = None
         self._enforce_task: asyncio.Task[None] | None = None
         self._now = time.monotonic  # overridable for tests
+        # The CC2 status has no total-layer field; it lives in the file's
+        # metadata (method 1044). We look it up once per filename and cache
+        # it so the UI can show "layer N / total".
+        self._total_layer_cache: dict[str, int] = {}
+        self._total_layer_task: asyncio.Task[None] | None = None
+        # Debounced speed mode for display (see SPEED_DISPLAY_DEBOUNCE_S).
+        self._display_speed_mode: int | None = None
+        self._sm_candidate: int | None = None
+        self._sm_candidate_since: float = 0.0
 
     @classmethod
     async def connect(
@@ -381,6 +395,8 @@ class CC2Printer(Printer):
         self._last_full_result = result
         payload = _cc2_status_to_cc1(result)
         self._track_speed_mode(payload)
+        self._stabilize_speed_mode(payload)
+        self._fill_total_layer(payload)
         st = Status.from_payload(payload)
         self._latest_status = st
         self._latest_status_event.set()
@@ -424,6 +440,27 @@ class CC2Printer(Printer):
     async def snapshot(self, *, timeout: float = camera_module.DEFAULT_TIMEOUT) -> bytes:
         return await camera_module.snapshot(
             self.host, timeout=timeout, port=camera_module.CAMERA_PORT_CC2
+        )
+
+    async def upload_file(
+        self,
+        local_path: str | Path,
+        *,
+        remote_name: str | None = None,
+        timeout: float = 180.0,
+        progress: upload_module.ProgressCallback | None = None,
+    ) -> str:
+        """Upload a file to the CC2 (PUT /upload with Content-Range)."""
+        from pycentauri import upload as upload_module
+
+        self._require_control("upload_file")
+        return await upload_module.upload_cc2(
+            self.host,
+            local_path,
+            access_code=self.access_code,
+            remote_name=remote_name,
+            timeout=timeout,
+            progress=progress,
         )
 
     # --- control overrides ----------------------------------------------------
@@ -478,9 +515,6 @@ class CC2Printer(Printer):
         result = await self._cc2_request(1031, {"mode": value})
         # An explicit choice through pycentauri pins the mode.
         self._pinned_mode = value
-        self._pin_candidate = None
-        self._pending_since = None
-        self._switch_seen = False
         return self._wrap_result(1031, result)
 
     async def set_fan_speed(
@@ -531,6 +565,17 @@ class CC2Printer(Printer):
         result = await self._cc2_request(1028, params)
         return self._wrap_result(1028, result)
 
+    async def set_light(self, on: bool) -> sdcp.ParsedMessage:
+        """Turn the chamber light on or off (method 1029). Requires enable_control.
+
+        The set field is ``power`` (0/1) — captured from Orca's wire
+        traffic on firmware 02.01.00.00. The current state comes back in
+        status as ``led.status``.
+        """
+        self._require_control("set_light")
+        result = await self._cc2_request(1029, {"power": 1 if on else 0})
+        return self._wrap_result(1029, result)
+
     async def canvas_status(self) -> CanvasStatus:
         """Return the Canvas multi-filament system state (method 2005)."""
         result = await self._cc2_request(2005, {})
@@ -542,11 +587,125 @@ class CC2Printer(Printer):
         result = await self._cc2_request(2004, {"auto_refill": enabled})
         return self._wrap_result(2004, result)
 
+    async def list_files(
+        self,
+        storage: str = "local",
+        *,
+        offset: int = 0,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        """List files on the printer (method 1044).
+
+        ``storage`` is ``"local"`` (internal) or ``"u-disk"`` (USB).
+        Returns the raw result dict with ``file_list`` (list of dicts with
+        ``filename``, ``size``, ``create_time``, ``layer``, ``print_time``,
+        ``color_map``, etc.), ``offset``, and ``total``.
+        """
+        params: dict[str, Any] = {
+            "storage_media": storage,
+            "offset": offset,
+            "limit": limit,
+        }
+        if storage == "u-disk":
+            params["dir"] = "/"
+        return await self._cc2_request(1044, params)
+
+    async def delete_files(
+        self,
+        filenames: list[str],
+        storage: str = "local",
+    ) -> dict[str, Any]:
+        """Delete one or more files from the printer (method 1047).
+
+        ``filenames`` is a list of file names (as returned by
+        :meth:`list_files`). ``storage`` is ``"local"`` or ``"u-disk"``.
+        Requires ``enable_control``.
+        """
+        self._require_control("delete_files")
+        if not filenames:
+            raise ValueError("at least one filename must be specified")
+        return await self._cc2_request(
+            1047,
+            {
+                "storage_media": storage,
+                "file_path": list(filenames),
+            },
+        )
+
+    def _stabilize_speed_mode(self, payload: dict[str, Any]) -> None:
+        """Override the noisy per-move speed_mode with a stable display value.
+
+        Runs after :meth:`_track_speed_mode` (which needs the raw value).
+        Prefers an explicit pin (a mode set via pycentauri); otherwise
+        debounces the wire value so per-move jitter doesn't reach the UI.
+        """
+        cc2 = payload.get("_cc2", {})
+        raw = cc2.get("speed_mode")
+        if isinstance(raw, int):
+            now = self._now()
+            if raw != self._sm_candidate:
+                self._sm_candidate = raw
+                self._sm_candidate_since = now
+            elif now - self._sm_candidate_since >= SPEED_DISPLAY_DEBOUNCE_S:
+                self._display_speed_mode = raw
+            if self._display_speed_mode is None:
+                self._display_speed_mode = raw  # bootstrap
+        effective = self._pinned_mode if self._pinned_mode is not None else self._display_speed_mode
+        if effective is not None:
+            cc2["speed_mode"] = effective
+            payload.setdefault("PrintInfo", {})["PrintSpeedPct"] = _SPEED_MODE_TO_PCT.get(
+                effective, 100
+            )
+
+    def _fill_total_layer(self, payload: dict[str, Any]) -> None:
+        """Inject the cached total-layer count, kicking off a lookup if absent.
+
+        The CC2's status carries only ``current_layer``. The total comes
+        from the file's metadata (method 1044), so we fetch it once per
+        printing file and cache it. Runs on the asyncio loop.
+        """
+        pi = payload.get("PrintInfo", {})
+        filename = pi.get("Filename")
+        # A non-empty filename means a print is active (printing or mid-
+        # switch) — that's when we want the total. Idle status has "".
+        if not filename:
+            return
+        cached = self._total_layer_cache.get(filename)
+        if cached is not None:
+            pi["TotalLayer"] = cached
+        elif self._total_layer_task is None or self._total_layer_task.done():
+            self._total_layer_task = asyncio.create_task(
+                self._lookup_total_layer(filename),
+                name=f"pycentauri-cc2-layers-{self.host}",
+            )
+
+    async def _lookup_total_layer(self, filename: str) -> None:
+        """Find ``filename`` in the file list and cache its layer count."""
+        for storage in ("local", "u-disk"):
+            try:
+                result = await self.list_files(storage, limit=200)
+            except Exception:
+                continue
+            for f in result.get("file_list", []):
+                if f.get("filename") == filename:
+                    layer = f.get("layer")
+                    if isinstance(layer, int) and layer > 0:
+                        self._total_layer_cache[filename] = layer
+                    return
+
+    async def disk_info(self) -> dict[str, Any]:
+        """Return disk usage (method 1048): ``total_bytes`` and ``used_bytes``."""
+        return await self._cc2_request(1048, {})
+
+    async def print_history(self, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
+        """Return print history (method 1036): ``history_task_list``."""
+        return await self._cc2_request(1036, {})
+
     async def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for task in (self._ping_task, self._enforce_task):
+        for task in (self._ping_task, self._enforce_task, self._total_layer_task):
             if task is not None and not task.done():
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -659,6 +818,8 @@ class CC2Printer(Printer):
             _deep_merge(self._last_full_result, result)
             payload = _cc2_status_to_cc1(self._last_full_result)
             self._track_speed_mode(payload)
+            self._stabilize_speed_mode(payload)
+            self._fill_total_layer(payload)
             st = Status.from_payload(payload)
             self._latest_status = st
             self._latest_status_event.set()
@@ -669,96 +830,35 @@ class CC2Printer(Printer):
             log.exception("failed to handle CC2 status push")
 
     def _track_speed_mode(self, payload: dict[str, Any]) -> None:
-        """Pin-and-enforce the user's speed mode (runs on the asyncio loop).
+        """Re-apply the pinned mode when a filament switch completes.
 
-        See the module-level constants for the firmware behaviour this
-        works around. In short: a non-balanced mode set anywhere is pinned
-        (from the touchscreen after a brief hold) and re-applied after each
-        filament switch resets it; a drop to balanced is adjudicated by
-        whether a switch follows within ``HUMAN_WINDOW_S`` — switch means
-        firmware (re-apply), no switch means a human chose balanced
-        (release the pin).
+        Explicit-pin only — we never infer or enforce from the wire
+        speed_mode (it's a per-move value on firmware 02.01.00.00). The
+        pin is cleared when the print ends and re-asserted once on the
+        27 -> 13 (switch complete -> printing) transition, which is where
+        the firmware historically reset the speed. Re-applying a mode
+        that's already correct is harmless.
         """
         print_status = payload.get("PrintInfo", {}).get("Status")
-        speed_mode = payload.get("_cc2", {}).get("speed_mode")
-        if not isinstance(speed_mode, int) or print_status is None:
+        if print_status is None:
             return
+        prev = self._prev_print_status
+        self._prev_print_status = print_status
 
         if print_status in (0, 8, 9, 14):
             # Print over (idle/stopped/completed/error): the pin dies with it.
             self._pinned_mode = None
-            self._pin_candidate = None
-            self._pending_since = None
-            self._switch_seen = False
             return
 
-        if print_status != 13:
-            # Filament switch (27) / pausing / etc. A park during an
-            # in-flight adjudication is the firmware signature.
-            if print_status == 27 and self._pending_since is not None:
-                self._switch_seen = True
+        # A Canvas filament switch just finished — re-assert the setting.
+        if prev == 27 and print_status == 13 and self._pinned_mode is not None:
+            self._reapply_pin()
+
+    def _reapply_pin(self) -> None:
+        if self._pinned_mode is None:
             return
-
-        # --- printing (status 13) ---
-        now = self._now()
-
-        # A non-balanced mode we're not already pinned to can only be a
-        # human (the firmware never sets one) — adopt it after a brief hold.
-        if speed_mode != 1 and speed_mode != self._pinned_mode:
-            if self._pin_candidate == speed_mode:
-                if now - self._pin_candidate_since >= PIN_LEARN_S:
-                    self._pinned_mode = speed_mode
-                    self._pin_candidate = None
-                    self._pending_since = None
-                    self._switch_seen = False
-            else:
-                self._pin_candidate = speed_mode
-                self._pin_candidate_since = now
-            return
-
-        self._pin_candidate = None
-
-        # Nothing to defend, or the pin is satisfied.
-        if self._pinned_mode is None or speed_mode == self._pinned_mode:
-            self._pending_since = None
-            self._switch_seen = False
-            return
-
-        # speed_mode == 1 (balanced) while pinned to a faster mode: the
-        # ambiguous case. Adjudicate by whether a switch follows.
-        if self._pending_since is None:
-            self._pending_since = now
-            self._switch_seen = False
-            return
-
-        if self._switch_seen:
-            # Firmware reset confirmed by the switch — re-apply, and keep
-            # re-applying (rate-limited) until it takes. Do NOT clear
-            # _pending_since here: only a match (above) clears it.
-            self._enforce(speed_mode, now)
-            return
-
-        if now - self._pending_since >= HUMAN_WINDOW_S:
-            # Balanced held this long with no switch: a human chose it.
-            log.info(
-                "balanced held %0.0fs with no filament switch — releasing "
-                "the speed-mode pin (was %d)",
-                now - self._pending_since,
-                self._pinned_mode,
-            )
-            self._pinned_mode = None
-            self._pending_since = None
-            self._switch_seen = False
-            return
-        # Still inside the window with no switch yet — keep waiting.
-
-    def _enforce(self, current_mode: int, now: float) -> None:
-        assert self._pinned_mode is not None
         if self._enforce_task is not None and not self._enforce_task.done():
             return
-        if now - self._last_enforce < ENFORCE_MIN_INTERVAL_S:
-            return
-        self._last_enforce = now
         if self.enable_control:
             self._enforce_task = asyncio.create_task(
                 self._apply_pinned_mode(self._pinned_mode),
@@ -766,9 +866,7 @@ class CC2Printer(Printer):
             )
         else:
             log.warning(
-                "speed_mode drifted to %d but pin is %d; enable_control is off "
-                "so it will not be re-applied",
-                current_mode,
+                "filament switch completed but enable_control is off; speed mode %d not re-applied",
                 self._pinned_mode,
             )
 

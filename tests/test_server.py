@@ -81,6 +81,56 @@ async def test_openapi_schema_generates(monkeypatch: pytest.MonkeyPatch) -> None
         assert r.json()["info"]["title"]
 
 
+async def test_upload_endpoint_spools_and_forwards(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_upload(
+        self: Any,
+        local_path: Any,
+        *,
+        remote_name: Any = None,
+        timeout: float = 180.0,
+        progress: Any = None,
+    ) -> Any:
+        captured["content"] = Path(local_path).read_bytes()
+        captured["remote_name"] = remote_name
+        return remote_name
+
+    monkeypatch.setattr("pycentauri.client.Printer.upload_file", fake_upload)
+
+    app = server_module.create_app("127.0.0.1", enable_control=True, mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        # A malicious filename must be reduced to its basename (no traversal).
+        r = await client.post(
+            "/files/upload",
+            files={"file": ("../../etc/model.gcode", b"G28\nG1 X0 Y0\n", "text/plain")},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True
+        assert body["filename"] == "model.gcode"
+        assert "start_response" not in body
+
+    assert captured["content"] == b"G28\nG1 X0 Y0\n"
+    assert captured["remote_name"] == "model.gcode"
+    await server.stop()
+
+
+async def test_upload_endpoint_404_without_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.post("/files/upload", files={"file": ("x.gcode", b"G28\n", "text/plain")})
+        assert r.status_code == 404
+    await server.stop()
+
+
 async def test_control_endpoints_404_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _FakePrinter()
     await server.start()
