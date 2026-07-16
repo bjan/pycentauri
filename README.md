@@ -229,6 +229,10 @@ centauri server --host 192.168.1.209 --bind 0.0.0.0 --port 8787 \
 # CC2
 centauri server --host 192.168.1.189 --access-code Ab3dEf \
                 --bind 0.0.0.0 --port 8787 --enable-control
+
+# Opt in to a dashboard "update available" badge (the only outbound call;
+# off by default — a cached PyPI check every 12 h, fail-silent)
+centauri server --host 192.168.1.209 --check-updates
 ```
 
 The server holds a single long-lived connection to the printer

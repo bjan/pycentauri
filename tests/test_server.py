@@ -375,6 +375,38 @@ async def test_delete_rejects_non_list_filenames(monkeypatch: pytest.MonkeyPatch
     await server.stop()
 
 
+def test_update_available_logic() -> None:
+    """PEP 440 comparison; a local dev build ahead of PyPI never nags."""
+    from pycentauri.server import _update_available
+
+    assert _update_available("0.8.0", "0.9.0") is True
+    assert _update_available("0.8.0", "0.8.0") is False
+    assert _update_available("0.9.0", "0.8.0") is False  # dev ahead of PyPI
+    assert _update_available("0.8.0", None) is False
+    assert _update_available("0.8.0", "not-a-version") is False
+
+
+async def test_api_info_reports_update_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/api/info always carries latest_version + update_available. With the
+    check off (default) latest is None; once a newer version is known it flips."""
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        info = (await client.get("/api/info")).json()
+        assert info["latest_version"] is None
+        assert info["update_available"] is False
+
+        # Simulate a completed PyPI check reporting a newer version.
+        app.state.update.latest = "999.0.0"
+        info2 = (await client.get("/api/info")).json()
+        assert info2["latest_version"] == "999.0.0"
+        assert info2["update_available"] is True
+    await server.stop()
+
+
 async def test_start_print_request_body_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _FakePrinter()
     await server.start()

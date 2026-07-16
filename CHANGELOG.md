@@ -4,6 +4,18 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and [Keep a
 Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-07-15
+
+### Added
+- **Optional update check in the dashboard** (`centauri server --check-updates`,
+  **off by default**). When enabled, the server does one cached PyPI lookup every
+  12 h and the web UI shows a subtle "↑ vX.Y.Z" badge next to the version when a
+  newer release is out, linking to its notes. Fail-silent, and the only outbound
+  (non-printer) call in the whole tool — so the default still "talks only to your
+  printer". `/api/info` gains `latest_version` and `update_available` (both inert
+  unless you opt in). Uses PEP 440 comparison, so a locally-run dev build that's
+  ahead of PyPI never shows a spurious update.
+
 ## [0.8.0] - 2026-07-15
 
 ### Added

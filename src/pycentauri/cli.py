@@ -743,6 +743,14 @@ def cmd_server(
     ),
     rtsp_fps: int = typer.Option(15, "--rtsp-fps"),
     rtsp_bitrate: str = typer.Option("2M", "--rtsp-bitrate"),
+    check_updates: bool = typer.Option(
+        False,
+        "--check-updates/--no-check-updates",
+        help=(
+            "Periodically check PyPI for a newer pycentauri and flag it in the "
+            "dashboard. Off by default — this is the only outbound (non-printer) call."
+        ),
+    ),
 ) -> None:
     """Run the HTTP + SSE server (requires `pip install 'pycentauri[server]'`)."""
     try:
@@ -779,6 +787,7 @@ def cmd_server(
         access_code=access_code,
         log_level=log_level,
         rtsp_config=rtsp_cfg,
+        check_updates=check_updates,
     )
 
 

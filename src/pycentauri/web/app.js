@@ -87,6 +87,15 @@ async function loadInfo() {
     const info = await r.json();
 
     $("version").textContent = info.version || "—";
+    const badge = $("update-badge");
+    if (info.update_available && info.latest_version) {
+      badge.textContent = `↑ v${info.latest_version}`;
+      badge.href = `https://github.com/bjan/pycentauri/releases/tag/v${info.latest_version}`;
+      badge.title = `pycentauri ${info.latest_version} is available (you have ${info.version})`;
+      badge.hidden = false;
+    } else {
+      badge.hidden = true;
+    }
     $("host").textContent = info.printer_host || "—";
     $("mainboard").textContent = info.mainboard_id || "—";
     $("mainboard").title = info.mainboard_id || "";

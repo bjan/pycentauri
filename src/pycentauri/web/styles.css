@@ -59,6 +59,16 @@ body {
   color: var(--amber);
 }
 .rail-ver { color: var(--fg-dim); font-size: 11px; }
+.rail-update {
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--amber);
+  text-decoration: none;
+  border: 1px solid var(--amber-deep);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.rail-update:hover { text-decoration: underline; }
 .rail-sep { color: var(--fg-faint); }
 .rail-dim { color: var(--fg-dim); }
 .rail a {

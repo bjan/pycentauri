@@ -314,6 +314,60 @@ def require_control(manager: PrinterManager = Depends(get_manager)) -> PrinterMa
 # --- App factory ------------------------------------------------------------
 
 
+# --- optional PyPI update check (opt-in via --check-updates) ----------------
+
+PYPI_JSON_URL = "https://pypi.org/pypi/pycentauri/json"
+UPDATE_CHECK_INTERVAL_S = 12 * 3600
+
+
+class _UpdateState:
+    """The latest version seen on PyPI, or ``None`` until a successful check."""
+
+    def __init__(self) -> None:
+        self.latest: str | None = None
+
+
+def _update_available(current: str, latest: str | None) -> bool:
+    """True when ``latest`` (from PyPI) is a newer release than ``current``.
+
+    Uses PEP 440 parsing so a locally-run dev build that's *ahead* of PyPI
+    (e.g. between commit and publish) never shows a spurious "update".
+    """
+    if not latest:
+        return False
+    try:
+        from packaging.version import InvalidVersion, parse
+
+        try:
+            return parse(latest) > parse(current)
+        except InvalidVersion:
+            return False
+    except Exception:
+        return False
+
+
+async def _update_check_loop(state: _UpdateState) -> None:
+    """Poll PyPI for the latest version on an interval. Fail-silent.
+
+    This is the single outbound (non-printer) call in the whole server, and
+    it runs only when ``--check-updates`` is set. It reads a version string
+    and sends nothing about the user or the printer.
+    """
+    import httpx
+
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(PYPI_JSON_URL, headers={"Accept": "application/json"})
+            if resp.status_code == 200:
+                latest = (resp.json().get("info") or {}).get("version")
+                if isinstance(latest, str):
+                    state.latest = latest
+        except Exception:
+            pass  # network down / PyPI hiccup — try again next interval
+        await asyncio.sleep(UPDATE_CHECK_INTERVAL_S)
+
+
 def create_app(
     host: str,
     *,
@@ -321,6 +375,7 @@ def create_app(
     mainboard_id: str | None = None,
     access_code: str | None = None,
     rtsp_config: rtsp_module.RtspConfig | None = None,
+    check_updates: bool = False,
 ) -> FastAPI:
     """Build the FastAPI app. ``host`` is the printer's IP/hostname.
 
@@ -342,10 +397,20 @@ def create_app(
         )
         app.state.manager = manager
         app.state.rtsp = RtspController(rtsp_config) if rtsp_config is not None else None
+        app.state.update = _UpdateState()
+        update_task: asyncio.Task[None] | None = None
+        if check_updates:
+            update_task = asyncio.create_task(
+                _update_check_loop(app.state.update), name="pycentauri-update-check"
+            )
         await manager.start()
         try:
             yield
         finally:
+            if update_task is not None:
+                update_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await update_task
             if app.state.rtsp is not None:
                 with contextlib.suppress(Exception):
                     await app.state.rtsp.stop()
@@ -619,9 +684,13 @@ def create_app(
     async def api_info(
         manager: PrinterManager = Depends(get_manager),
     ) -> dict[str, Any]:
+        update: _UpdateState | None = getattr(app.state, "update", None)
+        latest = update.latest if update is not None else None
         return {
             "service": "pycentauri",
             "version": __version__,
+            "latest_version": latest,
+            "update_available": _update_available(__version__, latest),
             "printer_host": manager.host,
             "mainboard_id": manager._mainboard_id,
             "connected": manager._printer is not None and not manager._printer._closed,
@@ -830,6 +899,7 @@ def run(
     access_code: str | None = None,
     log_level: str = "info",
     rtsp_config: rtsp_module.RtspConfig | None = None,
+    check_updates: bool = False,
 ) -> None:
     """Launch the server with uvicorn (blocks).
 
@@ -850,6 +920,7 @@ def run(
         mainboard_id=mainboard_id,
         access_code=access_code,
         rtsp_config=rtsp_config,
+        check_updates=check_updates,
     )
     # Bound graceful shutdown: open SSE/MJPEG streams never close on
     # their own, and without a timeout uvicorn waits for them forever —
