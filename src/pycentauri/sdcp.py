@@ -36,7 +36,9 @@ class Cmd(IntEnum):
     STOP_PRINT = 130
     RESUME_PRINT = 131
     GET_FILE_LIST = 258
+    DELETE_FILE_LIST = 259
     GET_PRINT_HISTORY = 320
+    GET_PRINT_HISTORY_DETAIL = 321
     GET_CANVAS_STATUS = 324
     # Cmd 403 is overloaded — the payload shape dispatches:
     # {"PrintSpeedPct": N}                            → set print speed

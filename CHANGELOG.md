@@ -4,7 +4,52 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) and [Keep a
 Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.8.0] - 2026-07-15
+
+### Added
+- **CC1 file management over SDCP** — `list_files`, `delete_files`, and
+  `print_history` now work on the original Centauri Carbon, not just the
+  CC2. They use SDCP Cmds 258 (`GET_FILE_LIST` `{"Url":"/local"}`), 259
+  (`DELETE_FILE_LIST` `{"FileList":[...]}`), and 320+321
+  (`GET_PRINT_HISTORY` / `_DETAIL`) — all commented out in Elegoo's SDK
+  but confirmed live on V0.3.0-o 2026-07-15. This **corrects an earlier
+  belief** that CC1 file listing required the cloud / crashed the daemon;
+  it's local, and the crash was from probing with an empty payload. CC1
+  history `TaskStatus` (1 = completed, 3 = stopped) is normalised to the
+  CC2's status codes so every surface renders both printers identically.
+  (CC1 has no disk-info equivalent; `disk_info()` still raises there.)
+- **File browser in the web dashboard.** A Files panel lists the
+  printer's files (name, size, layer count) with a local/USB toggle,
+  disk free-space in the header (CC2), per-file delete (when
+  `--enable-control`), and a refresh button. Auto-refreshes after an
+  upload. Works on both printers. Wires the `GET /files`, `GET /disk`,
+  and `POST /files/delete` endpoints — previously only reachable via
+  CLI/REST/MCP — into the UI.
+- **Print history panel in the web dashboard.** Lists past jobs
+  newest-first (name, completed/cancelled status, date) from
+  `GET /history`, on both printers. The undocumented CC2 `task_status`
+  enum was decoded by correlating with the stock dashboard: 1 = completed,
+  2 = cancelled. `centauri history` gets the same fix (newest-first +
+  correct labels).
+
+### Safety & robustness
+- **Delete refuses the file that's currently printing** (both models). The
+  motion stack streams gcode from disk, so removing the active file mid-print
+  can abort the job; `delete_files` now checks the live print state first and
+  raises rather than sending the delete. Verified live against a running CC1
+  print. Reads (list/history) are confirmed safe mid-print (hammered against
+  an active CC1 job with no disturbance).
+- **Transient timeouts on `/history`, `/disk`, `/files/delete` now map to 504,
+  not 501/502.** `RequestTimeoutError` subclasses `PrinterError`, so a bare
+  `except PrinterError` mislabeled a timeout as "unsupported" — which made the
+  web UI permanently hide the history/files panel until reload. 504 is
+  retryable; the panel stays. (`/files` already did this.)
+- **`POST /files/delete` validates `filenames` is a list of strings** — a bare
+  JSON string previously iterated per-character into a batch of malformed
+  delete Cmds on the crash-prone SDCP channel.
+- **Uploads no longer block the event loop.** The whole-file MD5 and per-chunk
+  reads run in a thread, so a large gcode upload doesn't stall the shared
+  status stream / camera while the server hashes and reads it.
 
 ## [0.7.0] - 2026-07-14
 

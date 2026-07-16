@@ -619,11 +619,20 @@ class CC2Printer(Printer):
 
         ``filenames`` is a list of file names (as returned by
         :meth:`list_files`). ``storage`` is ``"local"`` or ``"u-disk"``.
-        Requires ``enable_control``.
+        Requires ``enable_control``. Refuses to delete the file that's
+        currently printing — removing it mid-print can abort the job.
         """
         self._require_control("delete_files")
         if not filenames:
             raise ValueError("at least one filename must be specified")
+        active = (await self.status()).active_filename
+        if active:
+            active_base = active.rsplit("/", 1)[-1]
+            for n in filenames:
+                if n.rsplit("/", 1)[-1] == active_base:
+                    raise PrinterError(
+                        f"refusing to delete {active_base!r}: it is currently printing"
+                    )
         return await self._cc2_request(
             1047,
             {
@@ -697,8 +706,8 @@ class CC2Printer(Printer):
         """Return disk usage (method 1048): ``total_bytes`` and ``used_bytes``."""
         return await self._cc2_request(1048, {})
 
-    async def print_history(self, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
-        """Return print history (method 1036): ``history_task_list``."""
+    async def print_history(self) -> dict[str, Any]:
+        """Return print history (method 1036): ``history_task_list`` (full list)."""
         return await self._cc2_request(1036, {})
 
     async def close(self) -> None:

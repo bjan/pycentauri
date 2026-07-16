@@ -19,7 +19,7 @@ to and speaks the right protocol:
 | Live head speed | — | ✓ (`gcode_move.speed` ÷ 60 = the screen's mm/s readout) |
 | Fan channels | 3 | 5 |
 | Canvas multi-filament | — | ✓ (status + auto-refill) |
-| File management | upload only | ✓ (list, delete, disk info, history) |
+| File management | list, upload, delete, history | list, upload, delete, disk info, history |
 | Filament-switch detection | — | ✓ (position-based) |
 
 > **Status:** alpha, but used daily against real printers. Protocols were
@@ -94,12 +94,12 @@ centauri speed sport                            --host 192.168.1.209 --enable-co
 centauri fan  --model 100 --aux 60 --chamber 30 --host 192.168.1.209 --enable-control
 centauri temp --nozzle 215 --bed 60             --host 192.168.1.209 --enable-control
 
-# File management (CC2 only — CC1 lacks the LAN endpoints)
-centauri files        --host 192.168.1.189 --access-code Ab3dEf
+# File management (both models; `disk` is CC2-only)
+centauri files        --host 192.168.1.209                             # CC1
 centauri files --storage u-disk --host 192.168.1.189 --access-code Ab3dEf
-centauri disk         --host 192.168.1.189 --access-code Ab3dEf
-centauri history      --host 192.168.1.189 --access-code Ab3dEf
-centauri delete old.gcode --host 192.168.1.189 --access-code Ab3dEf --enable-control
+centauri disk         --host 192.168.1.189 --access-code Ab3dEf        # CC2 only
+centauri history      --host 192.168.1.209                             # CC1 or CC2
+centauri delete old.gcode --host 192.168.1.209 --enable-control
 
 # Chamber light (both models)
 centauri light on   --host 192.168.1.189 --access-code Ab3dEf --enable-control
@@ -265,11 +265,11 @@ with `--enable-control`.
 | `POST` | `/print/fan` | `{"model": 50, "auxiliary": 30, "chamber": 0}` — any subset, 0–100 † |
 | `POST` | `/print/temperature` | `{"nozzle": 215, "bed": 60}` — any subset, °C, 0 = off † |
 | `POST` | `/files/upload` | multipart `file=@model.gcode` (+ optional `start=true`) † |
-| `POST` | `/files/delete` | `{"filenames": ["a.gcode"], "storage": "local"}` (CC2) † |
-| `GET` | `/files` | `?storage=local&limit=100` — file list (CC2) |
-| `GET` | `/disk` | Disk usage: `total_bytes`, `used_bytes` (CC2) |
-| `GET` | `/history` | Print job history (CC2) |
-| `POST` | `/light` | `{"on": true}` — chamber light (CC2) † |
+| `POST` | `/files/delete` | `{"filenames": ["a.gcode"], "storage": "local"}` — refuses the printing file † |
+| `GET` | `/files` | `?storage=local&limit=100` — file list |
+| `GET` | `/disk` | Disk usage: `total_bytes`, `used_bytes` (CC2; `501` on CC1) |
+| `GET` | `/history` | Print job history |
+| `POST` | `/light` | `{"on": true}` — chamber light † |
 | `POST` | `/canvas/refill` | `{"enabled": true}` (CC2) † |
 | `GET` | `/api/rtsp` | RTSP bridge state (when `--rtsp`) |
 | `POST` | `/api/rtsp/start` · `/api/rtsp/stop` | Toggle the bridge (when `--rtsp`) |

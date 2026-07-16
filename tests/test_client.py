@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 from websockets.asyncio.server import serve
 
-from pycentauri.client import ControlDisabledError, Printer
+from pycentauri.client import ControlDisabledError, Printer, PrinterError
+from pycentauri.models import Status
 from pycentauri.sdcp import Cmd
 
 MAINBOARD = "abcdef123456"
@@ -183,6 +184,30 @@ async def test_control_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> N
                 await printer.start_print("cube.gcode")
             with pytest.raises(ControlDisabledError):
                 await printer.stop()
+
+
+async def test_delete_refuses_currently_printing_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fake reports print_status=13 printing 'cube.gcode'; deleting that
+    file must be refused before any Cmd 259 reaches the printer."""
+    async with _fake_printer() as server:
+        monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+        async with await Printer.connect(
+            "127.0.0.1", enable_control=True, mainboard_id=MAINBOARD
+        ) as printer:
+            with pytest.raises(PrinterError, match="currently printing"):
+                await printer.delete_files(["cube.gcode"])
+
+
+def test_active_filename_only_when_job_live() -> None:
+    """active_filename is the job file while busy, None when idle/terminal."""
+
+    def st(code: int) -> Status:
+        return Status.from_payload({"PrintInfo": {"Status": code, "Filename": "job.gcode"}})
+
+    assert st(13).active_filename == "job.gcode"  # printing
+    assert st(6).active_filename == "job.gcode"  # paused — still holds the file
+    for terminal in (0, 8, 9, 14):  # idle / stopped / completed / error
+        assert st(terminal).active_filename is None
 
 
 async def test_preseeded_mainboard_skips_attributes_wait(monkeypatch: pytest.MonkeyPatch) -> None:

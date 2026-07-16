@@ -15,9 +15,12 @@ Routes (start with ``centauri server``):
 * ``GET /events/status`` — Server-Sent Events stream of status pushes
 * ``GET /discover`` — UDP LAN scan (finds CC1s)
 * ``GET /canvas`` — Canvas multi-filament state (CC2)
+* ``GET /files`` / ``GET /disk`` / ``GET /history`` — file list, disk usage
+  (CC2), and print history (both models)
 * ``GET|POST /api/rtsp*`` — RTSP bridge state/control (with ``--rtsp``)
-* ``POST /print/{start,pause,resume,stop,speed,fan,temperature}`` and
-  ``POST /canvas/refill`` — registered only with ``--enable-control``.
+* ``POST /print/{start,pause,resume,stop,speed,fan,temperature}``,
+  ``POST /canvas/refill``, ``POST /light``, ``POST /files/upload``, and
+  ``POST /files/delete`` — registered only with ``--enable-control``.
 """
 
 from __future__ import annotations
@@ -500,7 +503,7 @@ def create_app(
         offset: int = 0,
         limit: int = 100,
     ) -> dict[str, Any]:
-        """List files on the printer (CC2 only). Query: ?storage=local|u-disk&offset=0&limit=100."""
+        """List files on the printer. Query: ?storage=local|u-disk&offset=0&limit=100."""
         try:
             return await manager.printer.list_files(storage, offset=offset, limit=limit)
         except RequestTimeoutError as err:
@@ -513,13 +516,19 @@ def create_app(
         body: dict[str, Any],
         manager: PrinterManager = Depends(require_control),
     ) -> dict[str, Any]:
-        """Delete file(s) from the printer (CC2 only). Body: {"filenames": [...], "storage": "local"}."""
+        """Delete file(s) from the printer. Body: {"filenames": [...], "storage": "local"}."""
         filenames = body.get("filenames", [])
         storage = body.get("storage", "local")
         if not filenames:
             raise HTTPException(status_code=400, detail="filenames list is required")
+        if not isinstance(filenames, list) or not all(isinstance(f, str) for f in filenames):
+            # Guard the SDCP channel: a bare string would iterate per-character
+            # into a batch of malformed delete Cmds.
+            raise HTTPException(status_code=400, detail="filenames must be a list of strings")
         try:
             result = await manager.printer.delete_files(filenames, storage=storage)
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=str(err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=502, detail=str(err)) from err
         return {"ok": True, "deleted": filenames, "response": result}
@@ -531,6 +540,8 @@ def create_app(
         """Disk usage (CC2 only): total_bytes, used_bytes."""
         try:
             return await manager.printer.disk_info()
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=str(err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=501, detail=str(err)) from err
 
@@ -538,9 +549,11 @@ def create_app(
     async def print_history(
         manager: PrinterManager = Depends(get_manager),
     ) -> dict[str, Any]:
-        """Print history (CC2 only)."""
+        """Print history."""
         try:
             return await manager.printer.print_history()
+        except RequestTimeoutError as err:
+            raise HTTPException(status_code=504, detail=str(err)) from err
         except PrinterError as err:
             raise HTTPException(status_code=501, detail=str(err)) from err
 
@@ -770,7 +783,7 @@ def create_app(
     async def set_light(
         body: LightBody, manager: PrinterManager = Depends(require_control)
     ) -> dict[str, Any]:
-        """Turn the chamber light on/off (CC2 only)."""
+        """Turn the chamber light on/off."""
         try:
             result = await manager.printer.set_light(body.on)
         except PrinterError as err:

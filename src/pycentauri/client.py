@@ -291,23 +291,68 @@ class Printer:
         offset: int = 0,
         limit: int = 100,
     ) -> dict[str, Any]:
-        """List files on the printer. CC2 only (MQTT method 1044)."""
-        raise PrinterError(
-            "File listing is not available on the CC1 over SDCP. SDCP Cmd 258 "
-            "(GET_FILE_LIST) is disabled in the firmware. It currently requires "
-            "a Centauri Carbon 2 (MQTT method 1044)."
-        )
+        """List files on the printer (SDCP Cmd 258 GET_FILE_LIST).
+
+        Verified live on V0.3.0-o 2026-07-15 with ``{"Url": "/local"}`` —
+        the same request the printer's own web UI sends. (The SDK has this
+        Cmd commented out, but the firmware handles it; earlier "258
+        crashes the daemon" observations were from sending it with an
+        empty payload.) Returns the same shape as the CC2 so every surface
+        works unchanged: ``{"file_list": [{filename, size, layer,
+        create_time}], "total"}``. ``offset``/``limit`` are applied
+        client-side (the firmware returns the whole list).
+        """
+        url = "/udisk" if storage in ("u-disk", "udisk", "usb") else "/local"
+        mid = await self.wait_for_mainboard()
+        resp = await self._request(sdcp.Cmd.GET_FILE_LIST, {"Url": url}, mid)
+        inner = resp.inner or {}
+        raw = (inner.get("Data") or {}).get("FileList", [])
+        files = [
+            {
+                # The firmware returns full paths ("/local/x.gcode"); strip
+                # to the bare name that start_print expects.
+                "filename": f.get("name", "").rsplit("/", 1)[-1],
+                "size": f.get("FileSize"),
+                "layer": f.get("TotalLayers"),
+                "create_time": f.get("CreateTime"),
+            }
+            for f in raw
+        ]
+        window = files[offset : offset + limit] if limit else files[offset:]
+        return {"file_list": window, "total": len(files), "offset": offset}
 
     async def delete_files(
         self,
         filenames: list[str],
         storage: str = "local",
     ) -> dict[str, Any]:
-        """Delete files from the printer. CC2 only (MQTT method 1047)."""
-        raise PrinterError(
-            "File deletion is not available on the CC1 over SDCP. It currently "
-            "requires a Centauri Carbon 2 (MQTT method 1047)."
-        )
+        """Delete files from the printer (SDCP Cmd 259 DELETE_FILE_LIST).
+
+        Verified live on V0.3.0-o 2026-07-15: the firmware wants a
+        ``{"FileList": ["/local/<name>", ...]}`` payload of *full* paths
+        (``{"Url": path}`` is silently ignored). ``filenames`` may be bare
+        names (as returned by :meth:`list_files`) or already-rooted paths;
+        both are normalised to ``/local`` / ``/udisk``.
+
+        Refuses to delete the file that's currently printing — the motion
+        stack streams gcode from disk, so pulling the active file mid-print
+        can abort or corrupt the running job.
+        """
+        self._require_control("delete_files")
+        active = (await self.status()).active_filename
+        if active:
+            active_base = active.rsplit("/", 1)[-1]
+            for n in filenames:
+                if n.rsplit("/", 1)[-1] == active_base:
+                    raise PrinterError(
+                        f"refusing to delete {active_base!r}: it is currently printing"
+                    )
+        prefix = "/udisk" if storage in ("u-disk", "udisk", "usb") else "/local"
+        paths = [n if n.startswith("/") else f"{prefix}/{n}" for n in filenames]
+        mid = await self.wait_for_mainboard()
+        resp = await self._request(sdcp.Cmd.DELETE_FILE_LIST, {"FileList": paths}, mid)
+        ack = ((resp.inner or {}).get("Data") or {}).get("Ack")
+        return {"deleted": paths, "ack": ack}
 
     async def disk_info(self) -> dict[str, Any]:
         """Return disk usage. CC2 only (MQTT method 1048)."""
@@ -316,12 +361,40 @@ class Printer:
             "requires a Centauri Carbon 2 (MQTT method 1048)."
         )
 
-    async def print_history(self, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
-        """Return print history. CC2 only (MQTT method 1036)."""
-        raise PrinterError(
-            "Print history is not available on the CC1 over SDCP. It currently "
-            "requires a Centauri Carbon 2 (MQTT method 1036)."
-        )
+    async def print_history(self) -> dict[str, Any]:
+        """Return print history (SDCP Cmd 320 + 321).
+
+        Two-step on the CC1: Cmd 320 returns the task-id list (newest-first),
+        Cmd 321 ``{"Id": [...]}`` returns per-task detail. Normalised to the
+        CC2's ``{"history_task_list": [...]}`` shape (oldest-first, like
+        method 1036) so the CLI and web history panel work unchanged.
+        Returns the whole list — newest-first display is the CLI/UI's job.
+        Verified live on V0.3.0-o 2026-07-15.
+        """
+        mid = await self.wait_for_mainboard()
+        id_resp = await self._request(sdcp.Cmd.GET_PRINT_HISTORY, {}, mid)
+        ids = ((id_resp.inner or {}).get("Data") or {}).get("HistoryData", [])
+        if not ids:
+            return {"history_task_list": []}
+        det = await self._request(sdcp.Cmd.GET_PRINT_HISTORY_DETAIL, {"Id": ids}, mid)
+        details = ((det.inner or {}).get("Data") or {}).get("HistoryDetailList", [])
+        # CC1 TaskStatus: 1 = completed, 3 = stopped (done < total layers).
+        # Map 3 → the CC2's 2 ("cancelled") so the shared {1: completed,
+        # 2: cancelled} status map covers both printers. (Confirmed
+        # 2026-07-15 by correlating status against AlreadyPrintLayer.)
+        tasks = [
+            {
+                "task_name": d.get("TaskName", "").rsplit("/", 1)[-1],
+                "task_status": 2 if d.get("TaskStatus") == 3 else d.get("TaskStatus"),
+                "begin_time": d.get("BeginTime"),
+                "end_time": d.get("EndTime"),
+            }
+            for d in details
+        ]
+        # Cmd 320 lists newest-first; return oldest-first to match the CC2 so
+        # the CLI/web (which reverse for display) show newest-first.
+        tasks.reverse()
+        return {"history_task_list": tasks}
 
     # --- control actions (gated) ----------------------------------------------
 

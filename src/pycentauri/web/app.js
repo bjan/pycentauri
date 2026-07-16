@@ -95,6 +95,7 @@ async function loadInfo() {
       $("controls").hidden = false;
       $("adjust").hidden = false;
       canvasControlEnabled = true;
+      filesControlEnabled = true;
     }
 
     try {
@@ -307,6 +308,8 @@ async function doUpload() {
     const data = await r.json();
     setMsg(`✓ uploaded ${data.filename}${start ? " — print started" : ""}`, "ok");
     input.value = "";
+    setTimeout(loadFiles, 1500); // reflect the new file in the Files panel
+
   } catch (e) {
     setMsg(`✗ upload: ${e.message}`, "err");
   } finally {
@@ -753,6 +756,191 @@ function wireCanvas() {
 }
 
 // ---------------------------------------------------------------------------
+// Files (GET /files, GET /disk, POST /files/delete). /disk is CC2-only;
+// its 501 on the CC1 is swallowed (best-effort disk-free display).
+
+let filesControlEnabled = false;
+let filesSupported = true;
+
+function setFilesMsg(text, kind) {
+  const el = $("files-msg");
+  el.classList.remove("ok", "warn", "err");
+  if (kind) el.classList.add(kind);
+  el.textContent = text || "";
+}
+
+function fmtSize(bytes) {
+  if (bytes == null) return "";
+  if (bytes >= 1e6) return `${(bytes / 1048576).toFixed(1)} MB`;
+  if (bytes >= 1e3) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${bytes} B`;
+}
+
+function renderFiles(data) {
+  const listEl = $("files-list");
+  listEl.innerHTML = "";
+  const files = (data && data.file_list) || [];
+  if (!files.length) {
+    const empty = document.createElement("div");
+    empty.className = "files-empty";
+    empty.textContent = "(no files)";
+    listEl.appendChild(empty);
+    return;
+  }
+  const storage = $("files-storage").value;
+  for (const f of files) {
+    const row = document.createElement("div");
+    row.className = "files-row";
+    const name = document.createElement("span");
+    name.className = "files-name";
+    name.textContent = f.filename;
+    name.title = f.filename;
+    const meta = document.createElement("span");
+    meta.className = "files-size";
+    const bits = [fmtSize(f.size)];
+    if (f.layer) bits.push(`${f.layer}L`);
+    meta.textContent = bits.join(" · ");
+    row.append(name, meta);
+    if (filesControlEnabled) {
+      const del = document.createElement("button");
+      del.className = "btn files-del";
+      del.type = "button";
+      del.textContent = "✕";
+      del.title = "Delete";
+      del.addEventListener("click", () => deleteFile(f.filename, storage));
+      row.appendChild(del);
+    }
+    listEl.appendChild(row);
+  }
+}
+
+async function loadFiles() {
+  // 501 = this printer has no file API (CC1); stop asking.
+  if (!filesSupported) return;
+  const storage = $("files-storage").value;
+  try {
+    const r = await fetch(`/files?storage=${encodeURIComponent(storage)}&limit=200`);
+    if (r.status === 501) {
+      filesSupported = false;
+      $("files-panel").hidden = true;
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    $("files-panel").hidden = false;
+    renderFiles(await r.json());
+  } catch (_) {
+    // transient (504 cooldown / reconnect) — keep what's on screen.
+    return;
+  }
+  // Disk usage in the header (best-effort).
+  try {
+    const d = await (await fetch("/disk")).json();
+    if (d && d.total_bytes) {
+      const freeGb = (d.total_bytes - d.used_bytes) / 1e9;
+      $("files-disk").textContent = `${freeGb.toFixed(1)} GB free`;
+    }
+  } catch (_) { /* ignore */ }
+}
+
+async function deleteFile(name, storage) {
+  if (!confirm(`Delete "${name}"?\n\nThis cannot be undone.`)) return;
+  setFilesMsg(`deleting ${name}…`);
+  try {
+    const r = await fetch("/files/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filenames: [name], storage }),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+    setFilesMsg(`deleted ${name}`, "ok");
+    setTimeout(loadFiles, 1500);
+  } catch (e) {
+    setFilesMsg(`delete failed — ${e.message}`, "err");
+  }
+}
+
+function wireFiles() {
+  $("files-refresh")?.addEventListener("click", () => {
+    setFilesMsg("refreshing…");
+    loadFiles().then(() => setFilesMsg(""));
+  });
+  $("files-storage")?.addEventListener("change", () => loadFiles());
+}
+
+// ---------------------------------------------------------------------------
+// Print history (GET /history)
+
+let historySupported = true;
+// task_status enum, confirmed 2026-07-15 by correlating with the stock
+// dashboard's Complete/Cancel labels: 1 = completed, 2 = cancelled.
+// (The CC1's native 3 = stopped is normalised to 2 in client.py.)
+const HISTORY_STATUS = { 1: "completed", 2: "cancelled" };
+
+function fmtDate(unixSec) {
+  if (!unixSec) return "";
+  const d = new Date(unixSec * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function renderHistory(data) {
+  const listEl = $("history-list");
+  listEl.innerHTML = "";
+  // The printer returns history oldest-first; show newest-first.
+  const tasks = [...((data && data.history_task_list) || [])].reverse();
+  if (!tasks.length) {
+    const empty = document.createElement("div");
+    empty.className = "files-empty";
+    empty.textContent = "(no history)";
+    listEl.appendChild(empty);
+    return;
+  }
+  for (const t of tasks) {
+    const row = document.createElement("div");
+    row.className = "files-row";
+    const name = document.createElement("span");
+    name.className = "files-name";
+    name.textContent = t.task_name || "?";
+    name.title = t.task_name || "";
+    const label = HISTORY_STATUS[t.task_status];
+    if (label) {
+      const stat = document.createElement("span");
+      stat.className = "hist-status hist-" + label;
+      stat.textContent = label;
+      row.appendChild(name);
+      row.appendChild(stat);
+    } else {
+      row.appendChild(name);
+    }
+    const when = document.createElement("span");
+    when.className = "files-size";
+    when.textContent = fmtDate(t.end_time || t.begin_time);
+    row.appendChild(when);
+    listEl.appendChild(row);
+  }
+}
+
+async function loadHistory() {
+  if (!historySupported) return;
+  try {
+    const r = await fetch("/history");
+    if (r.status === 501) {
+      historySupported = false;
+      $("history-panel").hidden = true;
+      return;
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    $("history-panel").hidden = false;
+    renderHistory(await r.json());
+  } catch (_) {
+    return; // transient — keep what's on screen
+  }
+}
+
+function wireHistory() {
+  $("history-refresh")?.addEventListener("click", () => loadHistory());
+}
+
+// ---------------------------------------------------------------------------
 // Webcam resilience — if the MJPEG stream stalls, reload it.
 
 function wireWebcamKeepalive() {
@@ -813,10 +1001,14 @@ function noteStatusForPoll(pstatus) {
   wireControls();
   wireAdjust();
   wireCanvas();
+  wireFiles();
+  wireHistory();
   wireRtsp();
   wireWebcamKeepalive();
   await loadInfo();
   await loadCanvas();
+  await loadFiles();
+  await loadHistory();
   await loadRtsp();
   await pollOnce();
   connectSSE();

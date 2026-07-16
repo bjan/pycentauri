@@ -176,6 +176,18 @@ class Status(BaseModel):
         """The ``PrintInfo.Status`` code (e.g. 13 = printing). See :class:`PrintStatus`."""
         return self.print_info.status if self.print_info else None
 
+    @property
+    def active_filename(self) -> str | None:
+        """The file currently tied up in a job, or ``None`` if idle/terminal.
+
+        A job holds its file in every state except IDLE/STOPPED/COMPLETED/
+        ERROR (0/8/9/14) — including paused, where the file is still needed
+        to resume. Used to refuse deleting the file out from under a print.
+        """
+        if self.print_status is None or self.print_status in (0, 8, 9, 14):
+            return None
+        return self.filename
+
 
 class PrintStatus:
     """``PrintInfo.Status`` codes from the official Elegoo SDK.

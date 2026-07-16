@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("fastapi")
 
 from pycentauri import server as server_module
-from pycentauri.client import Printer
+from pycentauri.client import Printer, RequestTimeoutError
 from tests.test_client import MAINBOARD, _FakePrinter
 
 
@@ -335,6 +335,43 @@ async def test_canvas_unsupported_maps_to_501(monkeypatch: pytest.MonkeyPatch) -
         r = await client.get("/canvas")
         assert r.status_code == 501
         assert "CC1" in r.json()["detail"]
+    await server.stop()
+
+
+async def test_history_timeout_maps_to_504(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient RequestTimeoutError on /history must surface as 504, not 501.
+
+    RequestTimeoutError subclasses PrinterError, so a bare `except PrinterError`
+    would mislabel a timeout as 501 — which the web UI reads as "unsupported"
+    and hides the history panel until reload. 504 is retryable; the panel stays.
+    """
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    async def _boom(self: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RequestTimeoutError("no response within 10.0s")
+
+    monkeypatch.setattr("pycentauri.client.Printer.print_history", _boom)
+
+    app = server_module.create_app("127.0.0.1", mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.get("/history")
+        assert r.status_code == 504
+    await server.stop()
+
+
+async def test_delete_rejects_non_list_filenames(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /files/delete with a bare string must 400, not iterate per-character
+    into a batch of malformed delete Cmds on the crash-prone SDCP channel."""
+    server = _FakePrinter()
+    await server.start()
+    monkeypatch.setattr("pycentauri.client.WS_PORT", server.port)
+
+    app = server_module.create_app("127.0.0.1", enable_control=True, mainboard_id=MAINBOARD)
+    async with app.router.lifespan_context(app), await _asgi_client(app) as client:
+        r = await client.post("/files/delete", json={"filenames": "cube.gcode"})
+        assert r.status_code == 400
     await server.stop()
 
 

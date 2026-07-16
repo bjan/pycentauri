@@ -31,6 +31,8 @@ modules, the request flows, and the lifetime of every connection.
 | `sdcp` | CC1 wire envelope: `build_request`, `parse_message`, `Cmd` enum | No (pure transform) |
 | `discovery` | UDP `M99999` broadcast + JSON parse (finds CC1s only) | Yes (UDP only) |
 | `camera` | MJPEG frame grabber; `CAMERA_PORT` (CC1 :3031) / `CAMERA_PORT_CC2` (:8080) | Yes (HTTP) |
+| `mjpeg_broadcast` | `CameraBroadcaster` — one shared upstream MJPEG connection fanned out to every browser (stale-detect reconnect; slow-consumer frame drop) | Yes (HTTP) |
+| `upload` | Chunked HTTP file upload (CC1 multipart `POST /uploadFile/upload`; CC2 `PUT /upload` with `Content-Range`); off-loop hashing/reads | Yes (HTTP) |
 | `client` | `Printer` — CC1 async WS client; reader task; request/response correlation; control gate; base API both models share | Yes (WS) |
 | `cc2` | `CC2Printer(Printer)` — MQTT transport, JSON-RPC envelope, CC2→CC1 payload translation, Canvas | Yes (MQTT + HTTP bootstrap) |
 | `connect` | `connect_auto()` — probes :1883 (CC2), else connects CC1 WS directly (no throwaway :3030 probe) | Yes (TCP probe) |

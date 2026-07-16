@@ -224,6 +224,30 @@
         </div>
         <div class="ctrl-msg" id="canvas-msg" aria-live="polite"></div>
       </div>
+
+      <div class="panel files-panel" id="files-panel" hidden>
+        <header class="panel-header">
+          <span class="panel-tag">Files</span>
+          <span class="files-disk" id="files-disk"></span>
+        </header>
+        <div class="files-list" id="files-list"></div>
+        <div class="files-meta">
+          <select class="files-storage" id="files-storage" title="Storage">
+            <option value="local">Local</option>
+            <option value="u-disk">USB</option>
+          </select>
+          <button class="btn files-refresh" id="files-refresh" type="button">Refresh</button>
+        </div>
+        <div class="ctrl-msg" id="files-msg" aria-live="polite"></div>
+      </div>
+
+      <div class="panel history-panel" id="history-panel" hidden>
+        <header class="panel-header"><span class="panel-tag">Print history</span></header>
+        <div class="files-list" id="history-list"></div>
+        <div class="files-meta">
+          <button class="btn files-refresh" id="history-refresh" type="button">Refresh</button>
+        </div>
+      </div>
     </aside>
   </main>
 

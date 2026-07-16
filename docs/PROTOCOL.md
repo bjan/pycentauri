@@ -146,6 +146,25 @@ actually accepts. We have probed and confirmed which work.
 | 403 | `CHANGE_PRINT_PARAMS` (temps) | `{"TempTargetNozzle": <°C>, "TempTargetHotbed": <°C>, "TempTargetBox": <°C>}` | `Ack=0`; heaters engage and `TempTarget*` updates on next push |
 | 403 | `CHANGE_PRINT_PARAMS` (light) | `{"LightStatus": {"SecondLight": <0\|1>}}` | chamber light toggles; `LightStatus.SecondLight` updates on next push. Verified live on V0.3.0-o 2026-07-14 (SDK had `SET_LIGHT` -> 403 commented out). |
 | 512 | `SUBSCRIBE`             | `{"TimePeriod": <ms>}` | `Ack=0`, then status pushes |
+| 258 | `GET_FILE_LIST` (CC1)   | `{"Url": "/local"}` (or `/udisk`) | `Data.FileList[]` of `{name (full path), FileSize, TotalLayers, CreateTime, type}`. The exact request the printer's own web UI sends. |
+| 259 | `DELETE_FILE_LIST` (CC1)| `{"FileList": ["/local/<name>", ...]}` (batch; **full paths**) | `Ack=0`; files gone on next list. `{"Url": path}` is silently ignored — the key must be `FileList`. |
+| 320 | `GET_PRINT_HISTORY` (CC1)| `{}` | `Data.HistoryData[]` — task-id UUIDs, **newest-first** |
+| 321 | `GET_PRINT_HISTORY_DETAIL` (CC1) | `{"Id": [<uuid>, ...]}` (batch) | `Data.HistoryDetailList[]` of `{TaskName, BeginTime, EndTime, TaskStatus, SliceInformation.{total_layer_numbers, print_time}, AlreadyPrintLayer, Thumbnail, MD5, ...}`. `TaskStatus`: **1 = completed, 3 = stopped** (done < total layers) |
+
+Cmds 258/259/320/321 are all **commented out** in the SDK's mapping
+table (like `SET_LIGHT` -> 403), yet the firmware handles them with the
+right payload. All four verified live on V0.3.0-o (OpenCentauri) 2026-07-15.
+The **read** cmds (258/320/321) were additionally hammered against an
+*active print* (layer 1 of a 367-layer job) with zero disturbance — the
+daemon stayed up and the print kept advancing — so listing/history are
+safe to call mid-print. `pycentauri.Printer.list_files/delete_files/
+print_history` wrap them and normalise the output to the CC2 shape
+(history `TaskStatus 3` → the CC2's `2`, "cancelled", so one `{1,2}`
+status map covers both printers). **Delete (259) is guarded**:
+`delete_files` refuses the file that's currently printing (the motion
+stack streams gcode from disk), on both models. Stock CC1 firmware
+(V1.1.46) was *not* re-tested for these four — behaviour there is
+inferred from the shared `app` binary, not verified.
 
 The `Cmd 403` payload shapes are dispatched by the firmware based on
 which keys are present. You can include only the fields you want to
@@ -155,21 +174,26 @@ fan without disturbing the others. Verified live on V0.3.0-o
 `pycentauri.Printer.set_print_speed/set_fan_speed/set_temperatures/set_light`
 wrap each variant with safety-bound input validation.
 
-### Confirmed-broken on V1.1.46 *and* V0.3.0-o (OpenCentauri)
+### Unknown-Cmd crash mode (the real hazard)
 
-The firmware **silently drops the first one or two** of these and then
-**crashes the `app` daemon entirely** when more arrive in quick
-succession. From the network's point of view this looks like a TCP RST
-on the WS connection, but the actual failure mode is much worse:
-the daemon process exits, all three SDCP-related ports (80, 3030, 3031)
-go silent, and any active print is killed (see the warning at the top
-of this doc). Probe new candidates **only on an idle printer**, with
-one-Cmd-per-connection plus a `Cmd 0` sanity check after.
+Genuinely *unrecognised* Cmd codes are dangerous: the firmware
+**silently drops the first one or two** and then **crashes the `app`
+daemon entirely** when more arrive in quick succession. From the
+network's point of view this looks like a TCP RST on the WS connection,
+but the actual failure mode is much worse: the daemon process exits, all
+three SDCP-related ports (80, 3030, 3031) go silent, and any active
+print is killed (see the warning at the top of this doc). Probe new
+candidates **only on an idle printer**, with one-Cmd-per-connection plus
+a `Cmd 0` sanity check after.
 
-| Cmd | Name | Notes |
-|---|---|---|
-| 258  | `GET_FILE_LIST` (CC1)  | No response, then daemon crash |
-| 320  | `PRINT_TASK_LIST` (CC1) | Same |
+> **Correction (2026-07-15):** Cmds **258** (`GET_FILE_LIST`) and **320**
+> (`PRINT_TASK_LIST`) were previously listed here as "no response, then
+> daemon crash." That was wrong — the crash came from sending them with
+> an *empty/incorrect* payload during early probing. With the correct
+> payload (`258 {"Url":"/local"}`, `320 {}`) both are stable and are now
+> in the **Confirmed-working** table above, along with 259 and 321. The
+> takeaway: an unexpected payload shape can trip the same crash path as a
+> truly unknown Cmd, so match the web UI's request exactly when probing.
 
 Note: the CC2 equivalents (methods 1036, 1044, 1047, 1048) were
 initially non-responsive on firmware 01.03.02.51 and listed here as
@@ -451,13 +475,23 @@ pycentauri implements upload in `upload.py`.
 Uploaded files land in internal storage under the name given, which is
 exactly what `START_PRINT`'s `Filename` expects (`/local/<name>`).
 
-### Listing and deleting (CC2 only, firmware 02.01.00.00+)
+### Listing and deleting
 
-On the CC2, four MQTT methods handle file management. They are
-**commented out** in Elegoo's `elegoo-link` SDK but **live on the wire**
-— reverse-engineered by capturing OrcaSlicer's device-tab traffic
-(2026-07-10). The CC1's SDCP Cmd 258 (`GET_FILE_LIST`) is disabled in
-the firmware and cannot be used.
+Both printers support listing, deleting, and print-history — over their
+respective transports. The `pycentauri.Printer` API is identical
+(`list_files` / `delete_files` / `disk_info` / `print_history`); only the
+wire methods differ.
+
+On the CC2 (firmware **02.01.00.00+**), four MQTT methods handle file
+management. They are **commented out** in Elegoo's `elegoo-link` SDK but
+**live on the wire** — reverse-engineered by capturing OrcaSlicer's
+device-tab traffic (2026-07-10).
+
+On the CC1, the equivalent SDCP Cmds (258/259/320/321) are *also*
+commented out in the SDK but **work with the right payload** — see the
+"Confirmed-working" Cmd table above. (An earlier note here claiming Cmd
+258 was "disabled" was wrong; corrected 2026-07-15.) The CC1 has no
+disk-info equivalent, so `disk_info()` raises there.
 
 | Method | Name | Params | Response |
 |---|---|---|---|
@@ -630,7 +664,7 @@ apart. Observed 2026-07-04 on firmware 01.03.02.51.
 | 1029 | `SET_LIGHT` | `{"power": <0\|1>}` | `error_code: 0`. Param is `power` (not `status`), captured from Orca 2026-07-14. Current state reads back as `led.status`. |
 | 1030 | `SET_FAN_SPEED` | `{"fan": <0-255>, "aux_fan": <0-255>, "box_fan": <0-255>}` | `error_code: 0`, fan physically responds |
 | 1031 | `SET_PRINT_SPEED` | `{"mode": <0-3>}` | `error_code: 1010` when idle (expected — only effective mid-print) |
-| 1036 | `PRINT_TASK_LIST` | `{}` | `error_code: 0`, `history_task_list` with task_id, task_name, task_status, begin/end_time (probed 2026-07-10) |
+| 1036 | `PRINT_TASK_LIST` | `{}` | `error_code: 0`, `history_task_list` (oldest-first) with task_id, task_name, `task_status` (**1 = completed, 2 = cancelled**, decoded 2026-07-15 against the stock dashboard), begin/end_time, timelapse fields (probed 2026-07-10) |
 | 1042 | `VIDEO_STREAM` | `{}` | `error_code: 0`, `{"url": "http://<ip>:8080/?action=stream"}` (non-responsive on 01.03.02.51; confirmed working on 02.01.00.00, captured from Orca 2026-07-10) |
 | 1043 | `UPDATE_PRINTER_NAME` | (not probed — SDK has it enabled) | — |
 | 1044 | `GET_FILE_LIST` | `{"storage_media": "local"\|"u-disk", "offset": 0, "limit": N}` | `file_list[]` with filename, size, create_time, layer, print_time, color_map. Non-responsive on 01.03.02.51; confirmed on 02.01.00.00, captured from Orca 2026-07-10. See "File transfer" section for full response shape. |

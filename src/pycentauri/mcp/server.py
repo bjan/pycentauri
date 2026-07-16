@@ -285,7 +285,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
 
     @mcp.tool()
     async def set_light(on: bool) -> dict[str, Any]:
-        """Turn the chamber light on (True) or off (False). CC2 only."""
+        """Turn the chamber light on (True) or off (False)."""
         async with await _open(enable_control=True) as printer:
             result = await printer.set_light(on)
         return {"ok": True, "response": result.inner}
@@ -307,7 +307,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         offset: int = 0,
         limit: int = 100,
     ) -> dict[str, Any]:
-        """List files on the printer (CC2 only).
+        """List files on the printer.
 
         ``storage`` is ``"local"`` (internal) or ``"u-disk"`` (USB).
         Returns ``file_list`` (filename, size, layers, print time, colors)
@@ -321,7 +321,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
         filenames: list[str],
         storage: str = "local",
     ) -> dict[str, Any]:
-        """DESTRUCTIVE. Delete file(s) from the printer (CC2 only).
+        """DESTRUCTIVE. Delete file(s) from the printer.
 
         ``filenames`` is a list of names as returned by ``list_files``.
         Ask the user for confirmation before invoking.
@@ -338,7 +338,7 @@ def build_server(*, enable_control: bool = False) -> FastMCP:
 
     @mcp.tool()
     async def print_history() -> dict[str, Any]:
-        """Return print job history (CC2 only)."""
+        """Return print job history."""
         async with await _open() as printer:
             return await printer.print_history()
 

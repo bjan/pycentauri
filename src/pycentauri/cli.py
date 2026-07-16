@@ -699,7 +699,7 @@ def cmd_history(
     access_code: AccessCodeOpt = None,
     as_json: JsonOpt = False,
 ) -> None:
-    """Show print history (CC2 only)."""
+    """Show print history."""
 
     async def run() -> None:
         async with await _open_printer(host, access_code=access_code) as printer:
@@ -707,10 +707,13 @@ def cmd_history(
         if as_json:
             typer.echo(json.dumps(result, indent=2, default=str))
         else:
-            tasks = result.get("history_task_list", [])
+            # Printer returns oldest-first; show newest-first.
+            tasks = list(reversed(result.get("history_task_list", [])))
             typer.echo(f"{len(tasks)} task(s):\n")
             for t in tasks:
-                status = {0: "running", 1: "paused", 2: "stopped", 3: "completed"}.get(
+                # task_status: 1 = completed, 2 = cancelled (confirmed
+                # 2026-07-15 against the stock dashboard).
+                status = {1: "completed", 2: "cancelled"}.get(
                     t.get("task_status", -1), f"status={t.get('task_status')}"
                 )
                 typer.echo(f"  {t.get('task_name', '?'):<50s}  {status}")

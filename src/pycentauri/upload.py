@@ -18,10 +18,11 @@ Endpoints and framing reverse-engineered from Elegoo's ``elegoo-link`` SDK
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid as uuid_mod
-from collections.abc import Callable, Iterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import httpx
@@ -45,26 +46,30 @@ def _file_md5(path: Path) -> str:
     return h.hexdigest()
 
 
-def _iter_chunks(path: Path) -> Iterator[tuple[int, bytes]]:
-    """Yield ``(offset, chunk_bytes)`` over the file, 1 MiB at a time."""
+async def _aiter_chunks(path: Path) -> AsyncIterator[tuple[int, bytes]]:
+    """Yield ``(offset, chunk_bytes)`` over the file, 1 MiB at a time.
+
+    Each read is pushed to a thread so a large file doesn't block the event
+    loop (the server shares it with the SSE status stream and camera).
+    """
     offset = 0
     with path.open("rb") as f:
         while True:
-            chunk = f.read(CHUNK_SIZE)
+            chunk = await asyncio.to_thread(f.read, CHUNK_SIZE)
             if not chunk:
                 return
             yield offset, chunk
             offset += len(chunk)
 
 
-def _resolve(local_path: str | Path, remote_name: str | None) -> tuple[Path, int, str, str]:
+def _resolve(local_path: str | Path, remote_name: str | None) -> tuple[Path, int, str]:
     path = Path(local_path)
     if not path.is_file():
         raise PrinterError(f"not a file: {path}")
     total = path.stat().st_size
     if total == 0:
         raise PrinterError(f"refusing to upload an empty file: {path}")
-    return path, total, (remote_name or path.name), _file_md5(path)
+    return path, total, (remote_name or path.name)
 
 
 async def upload_cc1(
@@ -76,11 +81,12 @@ async def upload_cc1(
     progress: ProgressCallback | None = None,
 ) -> str:
     """Upload a file to a CC1 (multipart POST). Returns the remote filename."""
-    path, total, name, md5 = _resolve(local_path, remote_name)
+    path, total, name = _resolve(local_path, remote_name)
+    md5 = await asyncio.to_thread(_file_md5, path)
     upload_id = uuid_mod.uuid4().hex
     url = f"http://{host}:{UPLOAD_PORT}/uploadFile/upload"
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for offset, chunk in _iter_chunks(path):
+        async for offset, chunk in _aiter_chunks(path):
             resp = await client.post(
                 url,
                 data={
@@ -108,11 +114,12 @@ async def upload_cc2(
     progress: ProgressCallback | None = None,
 ) -> str:
     """Upload a file to a CC2 (PUT with Content-Range). Returns the remote filename."""
-    path, total, name, md5 = _resolve(local_path, remote_name)
+    path, total, name = _resolve(local_path, remote_name)
+    md5 = await asyncio.to_thread(_file_md5, path)
     token = access_code or CC2_DEFAULT_TOKEN
     url = f"http://{host}:{UPLOAD_PORT}/upload"
     async with httpx.AsyncClient(timeout=timeout) as client:
-        for offset, chunk in _iter_chunks(path):
+        async for offset, chunk in _aiter_chunks(path):
             end = offset + len(chunk) - 1
             resp = await client.put(
                 url,
