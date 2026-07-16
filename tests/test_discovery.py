@@ -30,6 +30,7 @@ def test_parse_response_populates_fields() -> None:
     p = _parse_response(raw, "192.168.1.209")
     assert p is not None
     assert p.host == "192.168.1.209"
+    assert p.protocol == "cc1"
     assert p.mainboard_id == "ffffffff"
     assert p.name == "fake-carbon"
     assert p.machine_name == "Centauri Carbon"
@@ -61,3 +62,38 @@ def test_parse_response_tolerates_missing_data_block() -> None:
     p = _parse_response(raw, "10.0.0.5")
     assert p is not None
     assert p.mainboard_id == "bb"
+
+
+def test_parse_response_recognizes_cc2() -> None:
+    raw = json.dumps(
+        {
+            "id": 0,
+            "result": {
+                "host_name": "Centauri Carbon 2",
+                "machine_model": "Centauri Carbon 2",
+                "sn": "CC2ABCD1234567890",
+                "token_status": 0,
+                "lan_status": 1,
+            },
+        }
+    ).encode("utf-8")
+
+    p = _parse_response(raw, "192.168.1.50")
+    assert p is not None
+    assert p.host == "192.168.1.50"
+    assert p.protocol == "cc2"
+    assert p.mainboard_id is None
+    assert p.name == "Centauri Carbon 2"
+    assert p.machine_name == "Centauri Carbon 2"
+    assert p.firmware_version is None
+    assert p.serial_number == "CC2ABCD1234567890"
+    assert p.lan_status == 1
+
+
+def test_parse_response_rejects_cc2_missing_sn() -> None:
+    """A result block without ``sn`` doesn't match the CC2 shape — fall through."""
+    raw = json.dumps({"id": 0, "result": {"host_name": "no serial"}}).encode("utf-8")
+    p = _parse_response(raw, "10.0.0.5")
+    assert p is not None
+    assert p.protocol == "cc1"
+    assert p.mainboard_id is None

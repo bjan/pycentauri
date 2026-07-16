@@ -87,7 +87,7 @@ async def _resolve_target(host: str | None) -> tuple[str, str | None]:
     if len(found) > 1:
         _echo_err(f"Multiple printers found ({len(found)}); pass --host explicitly.")
         for p in found:
-            _echo_err(f"  {p.host}  {p.machine_name or '?'}  {p.firmware_version or '?'}")
+            _echo_err(f"  {p.host}  {p.machine_name or '?'}  {p.protocol}")
         raise typer.Exit(code=2)
     return found[0].host, found[0].mainboard_id
 
@@ -140,10 +140,13 @@ def cmd_discover(
             payload = [
                 {
                     "host": p.host,
+                    "protocol": p.protocol,
                     "mainboard_id": p.mainboard_id,
                     "name": p.name,
                     "machine_name": p.machine_name,
                     "firmware_version": p.firmware_version,
+                    "serial_number": p.serial_number,
+                    "lan_status": p.lan_status,
                 }
                 for p in found
             ]
@@ -153,10 +156,17 @@ def cmd_discover(
                 typer.echo("(no printers responded)")
                 return
             for p in found:
-                typer.echo(
-                    f"{p.host:<15s}  {p.machine_name or '?':<18s}  "
-                    f"fw={p.firmware_version or '?':<8s}  id={p.mainboard_id or '?'}"
-                )
+                if p.protocol == "cc2":
+                    cloud_note = " (cloud mode — not supported)" if p.lan_status == 0 else ""
+                    typer.echo(
+                        f"{p.host:<15s}  {p.machine_name or '?':<18s}  "
+                        f"cc2  sn={p.serial_number or '?'}{cloud_note}"
+                    )
+                else:
+                    typer.echo(
+                        f"{p.host:<15s}  {p.machine_name or '?':<18s}  "
+                        f"cc1  fw={p.firmware_version or '?':<8s}  id={p.mainboard_id or '?'}"
+                    )
 
     _run(run())
 

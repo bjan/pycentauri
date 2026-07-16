@@ -13,7 +13,7 @@ Routes (start with ``centauri server``):
 * ``GET /status`` / ``GET /attributes`` — printer state (JSON)
 * ``GET /snapshot`` / ``GET /stream`` — webcam JPEG / MJPEG proxy
 * ``GET /events/status`` — Server-Sent Events stream of status pushes
-* ``GET /discover`` — UDP LAN scan (finds CC1s)
+* ``GET /discover`` — UDP LAN scan (finds CC1s and CC2s)
 * ``GET /canvas`` — Canvas multi-filament state (CC2)
 * ``GET /files`` / ``GET /disk`` / ``GET /history`` — file list, disk usage
   (CC2), and print history (both models)
@@ -515,10 +515,13 @@ def create_app(
         return [
             {
                 "host": p.host,
+                "protocol": p.protocol,
                 "mainboard_id": p.mainboard_id,
                 "name": p.name,
                 "machine_name": p.machine_name,
                 "firmware_version": p.firmware_version,
+                "serial_number": p.serial_number,
+                "lan_status": p.lan_status,
             }
             for p in found
         ]
